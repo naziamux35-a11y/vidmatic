@@ -333,6 +333,54 @@ Output as JSON:
             "suggested_category": "Entertainment"
         }
 
+async def generate_ai_thumbnails(title: str, topic: str, count: int = 3) -> List[str]:
+    """Generate AI thumbnails using Gemini image generation"""
+    thumbnail_urls = []
+    
+    try:
+        for i in range(count):
+            chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"thumb_{uuid.uuid4().hex[:8]}",
+                system_message="You are a professional YouTube thumbnail designer. Create eye-catching, click-worthy thumbnails."
+            )
+            chat.with_model("gemini", "gemini-3-pro-image-preview").with_params(modalities=["image", "text"])
+            
+            styles = [
+                "Bold dramatic style with high contrast colors, large readable text overlay",
+                "Clean minimalist modern design with subtle gradients",
+                "Energetic dynamic style with bright colors and action elements"
+            ]
+            
+            prompt = f"""Create a professional YouTube thumbnail for a video titled: "{title}"
+Topic: {topic}
+
+Style: {styles[i % len(styles)]}
+
+Requirements:
+- 16:9 aspect ratio (YouTube thumbnail format)
+- Eye-catching and click-worthy
+- Professional quality
+- Suitable for YouTube audience
+- NO text in the image (text will be added separately)
+- High visual impact"""
+
+            msg = UserMessage(text=prompt)
+            text_response, images = await chat.send_message_multimodal_response(msg)
+            
+            if images and len(images) > 0:
+                # Convert to data URL for storage
+                img_data = images[0]['data']
+                mime_type = images[0].get('mime_type', 'image/png')
+                data_url = f"data:{mime_type};base64,{img_data}"
+                thumbnail_urls.append(data_url)
+                logger.info(f"Generated AI thumbnail {i+1}")
+            
+    except Exception as e:
+        logger.error(f"AI thumbnail generation failed: {e}")
+    
+    return thumbnail_urls
+
 async def generate_video_pipeline(video_id: str):
     """Complete video generation pipeline"""
     try:
@@ -459,24 +507,28 @@ async def generate_video_pipeline(video_id: str):
             {"$set": {
                 "status": VideoStatus.GENERATING_THUMBNAIL.value,
                 "progress": 70,
-                "progress_message": "Creating thumbnails..."
+                "progress_message": "Creating AI-powered thumbnails..."
             }}
         )
         
-        # Use stock images as thumbnails or generate with AI
-        thumbnail_urls = []
+        # Generate AI thumbnails
+        video_title = script_data.get("title", video["prompt"][:50])
+        ai_thumbnails = await generate_ai_thumbnails(video_title, video["prompt"], count=2)
         
-        # Get best images from stock media
+        # Combine AI thumbnails with best stock images
+        thumbnail_urls = ai_thumbnails.copy()
+        
+        # Add best stock images as additional options
         for img in stock_media.get("images", [])[:3]:
-            if img.get("url"):
+            if img.get("url") and len(thumbnail_urls) < 5:
                 thumbnail_urls.append(img["url"])
         
-        # If not enough, add video thumbnails
-        for vid in stock_media.get("videos", [])[:3]:
-            if vid.get("thumbnail") and len(thumbnail_urls) < 3:
+        # Add video thumbnails if needed
+        for vid in stock_media.get("videos", [])[:2]:
+            if vid.get("thumbnail") and len(thumbnail_urls) < 5:
                 thumbnail_urls.append(vid["thumbnail"])
         
-        # Fallback thumbnails
+        # Fallback if no thumbnails generated
         if not thumbnail_urls:
             thumbnail_urls = [
                 "https://images.pexels.com/photos/3861969/pexels-photo-3861969.jpeg?auto=compress&cs=tinysrgb&w=1280",
@@ -489,6 +541,7 @@ async def generate_video_pipeline(video_id: str):
             {"$set": {
                 "thumbnail_urls": thumbnail_urls,
                 "selected_thumbnail_url": thumbnail_urls[0] if thumbnail_urls else None,
+                "ai_thumbnails_count": len(ai_thumbnails),
                 "progress": 80,
                 "progress_message": "Thumbnails ready! Generating SEO..."
             }}
