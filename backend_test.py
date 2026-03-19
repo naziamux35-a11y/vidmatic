@@ -1,401 +1,445 @@
 #!/usr/bin/env python3
 """
-YouTube OAuth Callback Test with Composio Integration
-Testing backend functionality with connectedAccountId parameter
+Backend API Test Suite for Vidmatic Video Generation Workflow
+Tests the video creation, progress tracking, and publishing endpoints
 """
 
-import requests
+import asyncio
+import httpx
 import json
-import sys
-from datetime import datetime
+import time
+import uuid
+from typing import Dict, Any, Optional
 
-# Test configuration
-BACKEND_URL = "https://vidmatic-preview.preview.emergentagent.com"
-API_BASE = f"{BACKEND_URL}/api"
+# Configuration
+BACKEND_URL = "https://vidmatic-preview.preview.emergentagent.com/api"
+TIMEOUT = 60.0
 
-# Test user credentials for authentication
-TEST_EMAIL = "testuser_composio_callback@test.com"
-TEST_PASSWORD = "testpassword123"
-
-class YouTubeOAuthTester:
+class VidmaticTester:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        })
-        self.auth_token = None
-        self.user_id = None
-
-    def print_result(self, test_name, success, message, details=None):
-        """Print formatted test result"""
+        self.session_token = None
+        self.user_info = None
+        self.test_results = []
+        
+    def log_result(self, test_name: str, success: bool, details: str = ""):
+        """Log test result"""
         status = "✅ PASS" if success else "❌ FAIL"
-        print(f"{status} {test_name}")
-        print(f"   {message}")
-        if details:
-            print(f"   Details: {details}")
-        print()
-
-    def register_test_user(self):
-        """Register a test user for authentication"""
-        print("🔧 Setting up test user...")
-        
-        # Try to register user
-        register_data = {
-            "email": TEST_EMAIL,
-            "password": TEST_PASSWORD,
-            "name": "Test User Composio"
-        }
-        
-        response = self.session.post(f"{API_BASE}/auth/signup", json=register_data)
-        
-        if response.status_code == 200:
-            self.print_result("User Registration", True, "Test user registered successfully")
-            return True
-        elif response.status_code == 400 and "already" in response.text.lower():
-            self.print_result("User Registration", True, "Test user already exists, proceeding with login")
-            return True
-        else:
-            self.print_result("User Registration", False, f"Failed to register user: {response.status_code} - {response.text}")
-            return False
-
-    def authenticate(self):
-        """Authenticate and get JWT token"""
-        print("🔐 Authenticating...")
-        
-        login_data = {
-            "email": TEST_EMAIL,
-            "password": TEST_PASSWORD
-        }
-        
-        response = self.session.post(f"{API_BASE}/auth/login", json=login_data)
-        
-        if response.status_code == 200:
-            data = response.json()
-            self.auth_token = data.get("user", {}).get("user_id")  # For session-based auth, we'll use session cookies
-            self.user_id = data.get("user", {}).get("user_id")
-            
-            # We don't need JWT token for this app - it uses session cookies
-            self.print_result("Authentication", True, f"Successfully authenticated user: {self.user_id}")
-            return True
-        else:
-            self.print_result("Authentication", False, f"Login failed: {response.status_code} - {response.text}")
-            return False
-
-    def test_callback_with_composio_params(self):
-        """Test the callback endpoint with Composio connectedAccountId parameter"""
-        print("📞 Testing YouTube OAuth Callback with Composio Parameters...")
-        
-        # Test parameters as specified by the user
-        callback_params = {
-            "status": "success",
-            "connectedAccountId": "fb276b4f-4a84-4c83-89ae-a636e8093b73",
-            "appName": "youtube"
-        }
-        
-        # Create a pending connection first (simulate the start flow)
-        print("   Setting up pending connection...")
-        import asyncio
-        import os
-        from motor.motor_asyncio import AsyncIOMotorClient
-        
-        # We can't directly access the database from here, so we'll test the endpoint directly
-        # The callback should handle the case where a pending connection might not exist
+        print(f"{status} | {test_name}: {details}")
+        self.test_results.append({
+            "test": test_name,
+            "success": success,
+            "details": details
+        })
+    
+    async def register_test_user(self) -> bool:
+        """Register a test user for video testing"""
+        test_email = f"videotest_{uuid.uuid4().hex[:8]}@test.com"
+        test_name = f"Video Test User {uuid.uuid4().hex[:6]}"
         
         try:
-            # Make the callback request
-            response = self.session.get(
-                f"{API_BASE}/youtube/oauth/callback",
-                params=callback_params,
-                allow_redirects=False  # Don't follow redirects so we can check them
-            )
-            
-            if response.status_code in [302, 307]:
-                # Check redirect location
-                redirect_location = response.headers.get('location', '')
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                # Register user using email signup
+                response = await client.post(f"{BACKEND_URL}/auth/signup", json={
+                    "name": test_name,
+                    "email": test_email,
+                    "password": "TestPass123!"
+                })
                 
-                if "dashboard" in redirect_location.lower():
-                    if "youtube_connected=true" in redirect_location:
-                        # Extract channel_id if present
-                        channel_id = None
-                        if "channel_id=" in redirect_location:
-                            channel_id = redirect_location.split("channel_id=")[1].split("&")[0]
-                        
-                        self.print_result(
-                            "OAuth Callback (Success Flow)", 
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"DEBUG: Registration response: {data}")
+                    print(f"DEBUG: Response cookies: {dict(response.cookies)}")
+                    self.user_info = data.get("user")
+                    
+                    # Try to get session token from response or cookies
+                    self.session_token = data.get("session_token")
+                    if not self.session_token and response.cookies.get("session_token"):
+                        self.session_token = response.cookies["session_token"]
+                    
+                    self.log_result(
+                        "User Registration", 
+                        True, 
+                        f"User registered: {test_email}, Credits: {self.user_info.get('video_credits', 0)} + {self.user_info.get('free_video_credits', 0)} free, Token: {'Yes' if self.session_token else 'No'}"
+                    )
+                    return True
+                else:
+                    self.log_result("User Registration", False, f"Registration failed: {response.status_code} - {response.text}")
+                    return False
+                    
+        except Exception as e:
+            self.log_result("User Registration", False, f"Error: {str(e)}")
+            import traceback
+            print(f"DEBUG: Registration Exception: {traceback.format_exc()}")
+            return False
+    
+    def get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers"""
+        if not self.session_token:
+            return {}
+        return {"Authorization": f"Bearer {self.session_token}"}
+    
+    async def test_create_video(self) -> Optional[str]:
+        """Test POST /api/videos/create endpoint"""
+        if not self.session_token:
+            self.log_result("Create Video", False, "No authentication token")
+            return None
+        
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                # Test video creation
+                video_data = {
+                    "prompt": "How to build a sustainable garden at home",
+                    "video_length": "medium",
+                    "voice_style": "professional", 
+                    "visual_style": "cinematic"
+                }
+                
+                response = await client.post(
+                    f"{BACKEND_URL}/videos/create",
+                    json=video_data,
+                    headers=self.get_auth_headers()
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    video_id = data.get("video_id")
+                    status = data.get("status")
+                    progress = data.get("progress")
+                    
+                    if video_id and status == "pending":
+                        self.log_result(
+                            "Create Video", 
                             True, 
-                            "Callback successfully processed and redirected to dashboard with success",
-                            f"Redirect: {redirect_location}, Channel ID: {channel_id}"
+                            f"Video created: {video_id}, Status: {status}, Progress: {progress}%"
                         )
-                        return channel_id
-                    elif "youtube_error=" in redirect_location:
-                        error_msg = redirect_location.split("youtube_error=")[1].split("&")[0]
-                        self.print_result(
-                            "OAuth Callback (Error Handling)", 
-                            True, 
-                            f"Callback handled error and redirected appropriately: {error_msg}",
-                            f"Redirect: {redirect_location}"
-                        )
+                        return video_id
+                    else:
+                        self.log_result("Create Video", False, f"Invalid response format: {data}")
                         return None
                 else:
-                    self.print_result(
-                        "OAuth Callback", 
-                        False, 
-                        f"Unexpected redirect location: {redirect_location}"
-                    )
+                    self.log_result("Create Video", False, f"Failed: {response.status_code} - {response.text}")
                     return None
-            else:
-                self.print_result(
-                    "OAuth Callback", 
-                    False, 
-                    f"Expected redirect (302/307) but got: {response.status_code} - {response.text[:200]}"
-                )
-                return None
-                
+                    
         except Exception as e:
-            self.print_result(
-                "OAuth Callback", 
-                False, 
-                f"Exception during callback test: {str(e)}"
-            )
+            self.log_result("Create Video", False, f"Error: {e}")
             return None
-
-    def test_get_channels(self):
-        """Test the GET /api/youtube/channels endpoint"""
-        print("📺 Testing Get YouTube Channels...")
+    
+    async def test_video_progress(self, video_id: str) -> Dict[str, Any]:
+        """Test GET /api/videos/{video_id}/progress endpoint and track status changes"""
+        if not video_id:
+            self.log_result("Video Progress", False, "No video ID provided")
+            return {}
         
         try:
-            response = self.session.get(f"{API_BASE}/youtube/channels")
-            
-            if response.status_code == 200:
-                channels = response.json()
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                statuses_seen = set()
+                max_checks = 20  # Limit polling to avoid infinite loops
+                check_count = 0
                 
-                if isinstance(channels, list):
-                    if len(channels) > 0:
-                        self.print_result(
-                            "Get YouTube Channels", 
-                            True, 
-                            f"Successfully retrieved {len(channels)} connected channel(s)",
-                            f"Channels: {[ch.get('channel_name', 'Unknown') for ch in channels]}"
-                        )
-                        return channels
+                while check_count < max_checks:
+                    response = await client.get(
+                        f"{BACKEND_URL}/videos/{video_id}/progress",
+                        headers=self.get_auth_headers()
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        status = data.get("status")
+                        progress = data.get("progress", 0)
+                        message = data.get("progress_message", "")
+                        
+                        statuses_seen.add(status)
+                        
+                        print(f"   Progress Check {check_count + 1}: Status={status}, Progress={progress}%, Message={message}")
+                        
+                        # Check if video is in a final state
+                        if status in ["ready", "failed"]:
+                            break
+                        
+                        # Wait before next check
+                        await asyncio.sleep(3)
+                        check_count += 1
                     else:
-                        self.print_result(
-                            "Get YouTube Channels", 
-                            True, 
-                            "Successfully retrieved empty channel list (no connected channels)",
-                            "Response: []"
-                        )
-                        return []
-                else:
-                    self.print_result(
-                        "Get YouTube Channels", 
-                        False, 
-                        f"Expected list response but got: {type(channels).__name__}",
-                        f"Response: {response.text[:200]}"
-                    )
-                    return None
-            else:
-                self.print_result(
-                    "Get YouTube Channels", 
-                    False, 
-                    f"API returned error: {response.status_code} - {response.text[:200]}"
-                )
-                return None
+                        self.log_result("Video Progress", False, f"Progress check failed: {response.status_code}")
+                        return {}
                 
+                # Analyze the progression
+                expected_statuses = ["pending", "generating_script", "generating_video", "generating_voiceover", "generating_thumbnail", "ready"]
+                progression_analysis = f"Statuses seen: {list(statuses_seen)} (Expected: {expected_statuses})"
+                
+                final_response = await client.get(
+                    f"{BACKEND_URL}/videos/{video_id}/progress",
+                    headers=self.get_auth_headers()
+                )
+                
+                if final_response.status_code == 200:
+                    final_data = final_response.json()
+                    final_status = final_data.get("status")
+                    final_progress = final_data.get("progress", 0)
+                    
+                    success = len(statuses_seen) >= 2  # Should see at least 2 different statuses
+                    self.log_result(
+                        "Video Progress", 
+                        success, 
+                        f"Final: {final_status} ({final_progress}%). {progression_analysis}"
+                    )
+                    return final_data
+                else:
+                    self.log_result("Video Progress", False, "Failed to get final status")
+                    return {}
+                    
         except Exception as e:
-            self.print_result(
-                "Get YouTube Channels", 
-                False, 
-                f"Exception during channels test: {str(e)}"
-            )
-            return None
-
-    def test_oauth_start(self):
-        """Test the OAuth start endpoint to ensure it's working"""
-        print("🚀 Testing YouTube OAuth Start...")
+            self.log_result("Video Progress", False, f"Error: {str(e)}")
+            import traceback
+            print(f"DEBUG: Video Progress Exception: {traceback.format_exc()}")
+            return {}
+    
+    async def test_list_videos(self) -> bool:
+        """Test GET /api/videos/ endpoint"""
+        if not self.session_token:
+            self.log_result("List Videos", False, "No authentication token")
+            return False
         
         try:
-            response = self.session.post(f"{API_BASE}/youtube/oauth/start", json={})
-            
-            if response.status_code == 200:
-                data = response.json()
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                response = await client.get(
+                    f"{BACKEND_URL}/videos/",
+                    headers=self.get_auth_headers()
+                )
                 
-                required_fields = ["authorization_url", "connection_id", "state"]
-                missing_fields = [field for field in required_fields if field not in data]
-                
-                if not missing_fields:
-                    self.print_result(
-                        "OAuth Start", 
-                        True, 
-                        "OAuth start endpoint working correctly",
-                        f"Authorization URL: {data.get('authorization_url', '')[:50]}..."
-                    )
-                    return data
+                if response.status_code == 200:
+                    videos = response.json()
+                    if isinstance(videos, list):
+                        video_count = len(videos)
+                        self.log_result(
+                            "List Videos", 
+                            True, 
+                            f"Retrieved {video_count} videos. Sample fields: {list(videos[0].keys()) if videos else 'N/A'}"
+                        )
+                        return True
+                    else:
+                        self.log_result("List Videos", False, "Response is not a list")
+                        return False
                 else:
-                    self.print_result(
-                        "OAuth Start", 
-                        False, 
-                        f"Missing required fields: {missing_fields}",
-                        f"Response: {data}"
-                    )
-                    return None
-            else:
-                self.print_result(
-                    "OAuth Start", 
-                    False, 
-                    f"API returned error: {response.status_code} - {response.text[:200]}"
-                )
-                return None
-                
+                    self.log_result("List Videos", False, f"Failed: {response.status_code} - {response.text}")
+                    return False
+                    
         except Exception as e:
-            self.print_result(
-                "OAuth Start", 
-                False, 
-                f"Exception during OAuth start test: {str(e)}"
-            )
-            return None
-
-    def verify_database_channel_creation(self, channel_id):
-        """Verify that the channel was created in database by checking via API"""
-        if not channel_id:
-            print("🔍 Skipping database verification - no channel ID provided")
+            self.log_result("List Videos", False, f"Error: {str(e)}")
+            import traceback
+            print(f"DEBUG: List Videos Exception: {traceback.format_exc()}")
             return False
-            
-        print(f"🔍 Verifying channel creation in database (Channel ID: {channel_id})...")
+    
+    async def test_update_video(self, video_id: str) -> bool:
+        """Test PATCH /api/videos/{video_id} endpoint"""
+        if not video_id:
+            self.log_result("Update Video", False, "No video ID provided")
+            return False
         
-        # Get all channels and check if our channel exists
-        channels = self.test_get_channels()
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                # Test updating video metadata
+                update_data = {
+                    "title": "Updated: Sustainable Home Gardening Guide",
+                    "description": "Learn how to create an eco-friendly garden at home with sustainable practices",
+                    "tags": ["gardening", "sustainability", "home", "eco-friendly"],
+                    "selected_thumbnail_url": "https://example.com/new-thumbnail.jpg"
+                }
+                
+                response = await client.patch(
+                    f"{BACKEND_URL}/videos/{video_id}",
+                    json=update_data,
+                    headers=self.get_auth_headers()
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    message = data.get("message", "")
+                    self.log_result("Update Video", True, f"Video updated successfully: {message}")
+                    return True
+                else:
+                    self.log_result("Update Video", False, f"Failed: {response.status_code} - {response.text}")
+                    return False
+                    
+        except Exception as e:
+            self.log_result("Update Video", False, f"Error: {e}")
+            return False
+    
+    async def test_get_video_details(self, video_id: str) -> bool:
+        """Test GET /api/videos/{video_id} endpoint"""
+        if not video_id:
+            self.log_result("Get Video Details", False, "No video ID provided")
+            return False
         
-        if channels is not None:
-            matching_channels = [ch for ch in channels if ch.get('channel_id') == channel_id]
-            
-            if matching_channels:
-                channel = matching_channels[0]
-                self.print_result(
-                    "Database Channel Verification", 
-                    True, 
-                    f"Channel successfully created in database",
-                    f"Channel: {channel.get('channel_name', 'Unknown')}, User: {channel.get('user_id', 'Unknown')}, Active: {channel.get('is_active', 'Unknown')}"
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                response = await client.get(
+                    f"{BACKEND_URL}/videos/{video_id}",
+                    headers=self.get_auth_headers()
                 )
-                return True
-            else:
-                self.print_result(
-                    "Database Channel Verification", 
-                    False, 
-                    f"Channel {channel_id} not found in database"
+                
+                if response.status_code == 200:
+                    video = response.json()
+                    # Check for key fields
+                    required_fields = ["video_id", "status", "prompt", "created_at"]
+                    missing_fields = [field for field in required_fields if field not in video]
+                    
+                    if not missing_fields:
+                        self.log_result(
+                            "Get Video Details", 
+                            True, 
+                            f"Video details retrieved: Status={video.get('status')}, Title={video.get('title', 'None')}"
+                        )
+                        return True
+                    else:
+                        self.log_result("Get Video Details", False, f"Missing fields: {missing_fields}")
+                        return False
+                else:
+                    self.log_result("Get Video Details", False, f"Failed: {response.status_code} - {response.text}")
+                    return False
+                    
+        except Exception as e:
+            self.log_result("Get Video Details", False, f"Error: {str(e)}")
+            import traceback
+            print(f"DEBUG: Get Video Details Exception: {traceback.format_exc()}")
+            return False
+    
+    async def test_publish_video(self, video_id: str) -> bool:
+        """Test POST /api/videos/{video_id}/publish endpoint"""
+        if not video_id:
+            self.log_result("Publish Video", False, "No video ID provided")
+            return False
+        
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                # First, check if user has any YouTube channels
+                channels_response = await client.get(
+                    f"{BACKEND_URL}/youtube/channels",
+                    headers=self.get_auth_headers()
                 )
-                return False
+                
+                if channels_response.status_code != 200:
+                    self.log_result("Publish Video", False, "Could not retrieve YouTube channels")
+                    return False
+                
+                channels = channels_response.json()
+                if not channels:
+                    # No channels available - test with a fake channel_id to check error handling
+                    publish_data = {
+                        "channel_id": "fake_channel_id",
+                        "publish_now": False
+                    }
+                    
+                    response = await client.post(
+                        f"{BACKEND_URL}/videos/{video_id}/publish",
+                        json=publish_data,
+                        headers=self.get_auth_headers()
+                    )
+                    
+                    if response.status_code == 404:
+                        self.log_result("Publish Video", True, "Properly returns 404 for invalid channel (no channels available)")
+                        return True
+                    else:
+                        self.log_result("Publish Video", False, f"Expected 404 for invalid channel, got {response.status_code}")
+                        return False
+                else:
+                    # Use first available channel
+                    channel_id = channels[0]["channel_id"]
+                    publish_data = {
+                        "channel_id": channel_id,
+                        "publish_now": False
+                    }
+                    
+                    response = await client.post(
+                        f"{BACKEND_URL}/videos/{video_id}/publish",
+                        json=publish_data,
+                        headers=self.get_auth_headers()
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        message = data.get("message", "")
+                        status = data.get("status", "")
+                        self.log_result("Publish Video", True, f"Video scheduled: {message}, Status: {status}")
+                        return True
+                    elif response.status_code == 400:
+                        # Video might not be ready for publishing
+                        error_detail = response.json().get("detail", "")
+                        if "not ready" in error_detail.lower():
+                            self.log_result("Publish Video", True, f"Proper error handling: {error_detail}")
+                            return True
+                        else:
+                            self.log_result("Publish Video", False, f"Unexpected 400 error: {error_detail}")
+                            return False
+                    else:
+                        self.log_result("Publish Video", False, f"Failed: {response.status_code} - {response.text}")
+                        return False
+                        
+        except Exception as e:
+            self.log_result("Publish Video", False, f"Error: {e}")
+            return False
+    
+    async def test_video_workflow(self) -> None:
+        """Test the complete video generation workflow"""
+        print("=== VIDMATIC VIDEO GENERATION WORKFLOW TESTING ===\n")
+        
+        # Step 1: Register test user
+        if not await self.register_test_user():
+            print("❌ Cannot proceed without authentication")
+            return
+        
+        print(f"\n=== Testing Video Endpoints with User: {self.user_info.get('email')} ===\n")
+        
+        # Step 2: Create video
+        video_id = await self.test_create_video()
+        if not video_id:
+            print("❌ Cannot proceed without video creation")
+            return
+        
+        print(f"\n=== Tracking Video Generation Progress for {video_id} ===")
+        
+        # Step 3: Track progress (this will poll until completion or timeout)
+        final_video_status = await self.test_video_progress(video_id)
+        
+        print(f"\n=== Testing Other Video Endpoints ===")
+        
+        # Step 4: List videos
+        await self.test_list_videos()
+        
+        # Step 5: Get video details
+        await self.test_get_video_details(video_id)
+        
+        # Step 6: Update video metadata  
+        await self.test_update_video(video_id)
+        
+        # Step 7: Test publish endpoint
+        await self.test_publish_video(video_id)
+        
+        # Summary
+        print(f"\n=== TEST SUMMARY ===")
+        total_tests = len(self.test_results)
+        passed_tests = sum(1 for result in self.test_results if result["success"])
+        failed_tests = total_tests - passed_tests
+        
+        print(f"Total Tests: {total_tests}")
+        print(f"Passed: {passed_tests}")
+        print(f"Failed: {failed_tests}")
+        
+        if failed_tests > 0:
+            print(f"\n❌ FAILED TESTS:")
+            for result in self.test_results:
+                if not result["success"]:
+                    print(f"   • {result['test']}: {result['details']}")
+        
+        if passed_tests == total_tests:
+            print(f"\n🎉 ALL TESTS PASSED! Video workflow is working correctly.")
         else:
-            self.print_result(
-                "Database Channel Verification", 
-                False, 
-                "Could not retrieve channels to verify database creation"
-            )
-            return False
+            print(f"\n⚠️  {failed_tests} tests failed. See details above.")
 
-    def test_callback_error_scenarios(self):
-        """Test various error scenarios for the callback endpoint"""
-        print("🚨 Testing YouTube OAuth Callback Error Scenarios...")
-        
-        error_scenarios = [
-            # Missing parameters
-            ({}, "no parameters"),
-            # Missing connectedAccountId
-            ({"status": "success", "appName": "youtube"}, "missing connectedAccountId"),
-            # Error parameter
-            ({"error": "access_denied"}, "access denied error"),
-            # Invalid status
-            ({"status": "failure", "connectedAccountId": "invalid-id", "appName": "youtube"}, "failure status"),
-        ]
-        
-        all_passed = True
-        
-        for params, scenario_name in error_scenarios:
-            try:
-                response = self.session.get(
-                    f"{API_BASE}/youtube/oauth/callback",
-                    params=params,
-                    allow_redirects=False
-                )
-                
-                if response.status_code in [302, 307]:
-                    redirect_location = response.headers.get('location', '')
-                    
-                    if "youtube_error=" in redirect_location:
-                        self.print_result(
-                            f"Error Scenario ({scenario_name})", 
-                            True, 
-                            "Properly handled error and redirected with error parameter",
-                            f"Redirect: {redirect_location}"
-                        )
-                    else:
-                        self.print_result(
-                            f"Error Scenario ({scenario_name})", 
-                            False, 
-                            f"Expected error redirect but got: {redirect_location}"
-                        )
-                        all_passed = False
-                else:
-                    self.print_result(
-                        f"Error Scenario ({scenario_name})", 
-                        False, 
-                        f"Expected redirect but got: {response.status_code} - {response.text[:100]}"
-                    )
-                    all_passed = False
-                    
-            except Exception as e:
-                self.print_result(
-                    f"Error Scenario ({scenario_name})", 
-                    False, 
-                    f"Exception: {str(e)}"
-                )
-                all_passed = False
-        
-        return all_passed
-
-    def run_all_tests(self):
-        """Run all tests in sequence"""
-        print("=" * 80)
-        print("🧪 YouTube OAuth Callback Testing with Composio Integration")
-        print("=" * 80)
-        print()
-        
-        # Setup
-        if not self.register_test_user():
-            return False
-            
-        if not self.authenticate():
-            return False
-        
-        print("=" * 50)
-        print("🔬 CORE TESTS")
-        print("=" * 50)
-        
-        # Test OAuth start (to ensure basic functionality)
-        oauth_start_data = self.test_oauth_start()
-        
-        # Test the main callback functionality with Composio parameters
-        channel_id = self.test_callback_with_composio_params()
-        
-        # Test getting channels
-        channels = self.test_get_channels()
-        
-        # Verify database creation
-        if channel_id:
-            self.verify_database_channel_creation(channel_id)
-        
-        print("=" * 50)
-        print("🔬 ERROR HANDLING TESTS")
-        print("=" * 50)
-        
-        # Test error scenarios
-        self.test_callback_error_scenarios()
-        
-        print("=" * 80)
-        print("🏁 Testing Complete")
-        print("=" * 80)
+async def main():
+    """Main test execution"""
+    tester = VidmaticTester()
+    await tester.test_video_workflow()
 
 if __name__ == "__main__":
-    tester = YouTubeOAuthTester()
-    tester.run_all_tests()
+    asyncio.run(main())
