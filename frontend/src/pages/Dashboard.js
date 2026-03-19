@@ -16,7 +16,7 @@ const Dashboard = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
   const [channels, setChannels] = useState([]);
-  const [stats, setStats] = useState({ videos: 128, published: 45, views: '1.2M', channels: 2 });
+  const [stats, setStats] = useState({ videos: 0, published: 0, views: '0', channels: 0 });
   
   // Video generation state
   const [videoPrompt, setVideoPrompt] = useState('');
@@ -71,6 +71,8 @@ const Dashboard = () => {
     try {
       const response = await api.get('/youtube/channels');
       setChannels(response.data);
+      // Update stats with real channel count
+      setStats(prev => ({ ...prev, channels: response.data.length }));
     } catch (error) {
       console.error('Failed to fetch channels:', error);
     }
@@ -250,15 +252,24 @@ const Dashboard = () => {
                     {channels.length > 0 && (
                       <div className="space-y-3 text-left mb-6">
                         {channels.map(channel => (
-                          <div key={channel.channel_id} className="flex items-center justify-between p-3 rounded-xl border border-zinc-700 bg-zinc-800/50">
+                          <div key={channel.channel_id} className="flex items-center justify-between p-4 rounded-xl border border-emerald-700/50 bg-emerald-900/20">
                             <div className="flex items-center gap-3">
-                              <img src={channel.channel_avatar} alt={channel.channel_name} className="w-8 h-8 rounded-full" />
+                              <img 
+                                src={channel.channel_avatar || 'https://www.youtube.com/img/desktop/yt_1200.png'} 
+                                alt={channel.channel_name} 
+                                className="w-10 h-10 rounded-full object-cover bg-zinc-700"
+                                onError={(e) => {
+                                  e.target.src = 'https://www.youtube.com/img/desktop/yt_1200.png';
+                                }}
+                              />
                               <div>
                                 <p className="text-sm font-medium text-white">{channel.channel_name}</p>
-                                <p className="text-xs text-zinc-500">Connected</p>
+                                <p className="text-xs text-emerald-400">
+                                  {channel.connection_status === 'ACTIVE' ? '● Connected' : 'Connected'}
+                                </p>
                               </div>
                             </div>
-                            <CheckCircle className="w-5 h-5 text-emerald-400" />
+                            <CheckCircle className="w-6 h-6 text-emerald-400" />
                           </div>
                         ))}
                       </div>

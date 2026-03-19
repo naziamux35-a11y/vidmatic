@@ -130,11 +130,17 @@ async def start_oauth(req: OAuthStartRequest, user: User = Depends(get_current_u
 @youtube_router.get("/oauth/callback")
 async def oauth_callback(
     request: Request,
-    connectionId: str = Query(None, description="Composio connection ID"),
+    connectionId: str = Query(None, description="Composio connection ID (old format)"),
+    connectedAccountId: str = Query(None, description="Composio connected account ID"),
+    status: str = Query(None, description="Connection status"),
+    appName: str = Query(None, description="App name"),
     error: str = Query(None)
 ):
     """Handle YouTube OAuth callback from Composio"""
-    logger.info(f"OAuth callback received. connectionId: {connectionId}, error: {error}")
+    # Composio sends connectedAccountId, not connectionId
+    connection_id = connectedAccountId or connectionId
+    
+    logger.info(f"OAuth callback received. connectedAccountId: {connectedAccountId}, connectionId: {connectionId}, status: {status}")
     logger.info(f"Full query params: {dict(request.query_params)}")
     
     # Handle errors
@@ -142,30 +148,31 @@ async def oauth_callback(
         logger.error(f"OAuth error: {error}")
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error={error}")
     
-    if not connectionId:
-        logger.error("No connectionId received in callback")
+    if not connection_id:
+        logger.error("No connection ID received in callback")
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_connection_id")
     
     try:
         # Get the connection details from Composio
-        connection = composio_client.connected_accounts.get(connection_id=connectionId)
+        connection = composio_client.connected_accounts.get(connection_id=connection_id)
         
         if not connection:
-            logger.error(f"Connection not found: {connectionId}")
+            logger.error(f"Connection not found: {connection_id}")
             return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=connection_not_found")
         
-        logger.info(f"Connection status: {connection}")
+        logger.info(f"Connection retrieved: {connection}")
         
         # Get connection details
         connection_dict = connection.__dict__ if hasattr(connection, '__dict__') else {}
-        entity_id = connection_dict.get('entityId') or connection_dict.get('entity_id')
-        status = connection_dict.get('status', 'unknown')
+        # Composio stores user_id in clientUniqueUserId field
+        entity_id = connection_dict.get('clientUniqueUserId') or connection_dict.get('entityId') or connection_dict.get('entity_id')
+        conn_status = connection_dict.get('status', 'unknown')
         
-        logger.info(f"Connection entity_id: {entity_id}, status: {status}")
+        logger.info(f"Connection entity_id: {entity_id}, conn_status: {conn_status}")
         
         if not entity_id:
             # Try to find the user from pending connections
-            pending = await db.pending_connections.find_one({"connected_account_id": connectionId})
+            pending = await db.pending_connections.find_one({"connected_account_id": connection_id})
             if pending:
                 entity_id = pending.get("user_id")
                 logger.info(f"Found entity_id from pending connections: {entity_id}")
@@ -174,19 +181,21 @@ async def oauth_callback(
             logger.error("No entity_id found")
             return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_user_found")
         
-        # Get channel info
+        # Get channel info - use connection data
         channel_name = "YouTube Channel"
         channel_avatar = None
         subscriber_count = 0
-        youtube_channel_id = connectionId
+        youtube_channel_id = connection_id
         
-        # Try to get channel info from the connection metadata
-        if hasattr(connection, 'metadata') and connection.metadata:
-            meta = connection.metadata
-            channel_name = meta.get('channel_name', meta.get('title', 'YouTube Channel'))
-            channel_avatar = meta.get('channel_avatar', meta.get('thumbnail'))
-            subscriber_count = int(meta.get('subscriber_count', 0))
-            youtube_channel_id = meta.get('youtube_channel_id', connectionId)
+        # Try to get info from connection
+        if hasattr(connection, 'connectionParams') and connection.connectionParams:
+            params = connection.connectionParams
+            if hasattr(params, 'scope'):
+                logger.info(f"Connection scope: {params.scope}")
+        
+        # Check if there's account info in connected_account_id's metadata
+        # For now, we'll use a default name that user can update later
+        # We could also try to fetch channel details using the connection
         
         # Create or update channel record in database
         channel_id = f"ch_{uuid.uuid4().hex[:12]}"
@@ -194,10 +203,11 @@ async def oauth_callback(
             "channel_id": channel_id,
             "user_id": entity_id,
             "youtube_channel_id": youtube_channel_id,
-            "channel_name": channel_name,
-            "channel_avatar": channel_avatar,
+            "channel_name": f"Connected YouTube Channel",  # User can rename later
+            "channel_avatar": "https://www.youtube.com/img/desktop/yt_1200.png",  # Default YT avatar
             "subscriber_count": subscriber_count,
-            "composio_connection_id": connectionId,
+            "composio_connection_id": connection_id,
+            "connection_status": conn_status,
             "connected_at": datetime.now(timezone.utc).isoformat(),
             "is_active": True
         }
@@ -205,7 +215,7 @@ async def oauth_callback(
         # Check if channel already exists for this user with this connection
         existing_channel = await db.channels.find_one({
             "user_id": entity_id,
-            "composio_connection_id": connectionId
+            "composio_connection_id": connection_id
         })
         
         if existing_channel:
@@ -226,7 +236,7 @@ async def oauth_callback(
             logger.info(f"Created new channel: {channel_id}")
         
         # Clean up pending connection
-        await db.pending_connections.delete_one({"connected_account_id": connectionId})
+        await db.pending_connections.delete_one({"connected_account_id": connection_id})
         
         # Redirect back to dashboard with success
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_connected=true&channel_id={channel_id}")
