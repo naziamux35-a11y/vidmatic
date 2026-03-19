@@ -71,16 +71,16 @@ async def oauth_callback(code: str, state: str = None, error: str = None, reques
     # Handle OAuth errors from Google
     if error:
         from fastapi.responses import RedirectResponse
-        frontend_url = 'https://video-wizard-dev.preview.emergentagent.com'
+        frontend_url = 'https://vidmatic-preview.preview.emergentagent.com'
         return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error={error}")
     
     if not code:
         from fastapi.responses import RedirectResponse
-        frontend_url = 'https://video-wizard-dev.preview.emergentagent.com'
+        frontend_url = 'https://vidmatic-preview.preview.emergentagent.com'
         return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error=no_code_received")
     
     # Get redirect URI - must match exactly what was sent to Google
-    redirect_uri = 'https://video-wizard-dev.preview.emergentagent.com/api/youtube/oauth/callback'
+    redirect_uri = 'https://vidmatic-preview.preview.emergentagent.com/api/youtube/oauth/callback'
     
     client_config = {
         "web": {
@@ -108,7 +108,7 @@ async def oauth_callback(code: str, state: str = None, error: str = None, reques
     except Exception as e:
         # Redirect back with error
         from fastapi.responses import RedirectResponse
-        frontend_url = 'https://video-wizard-dev.preview.emergentagent.com'
+        frontend_url = 'https://vidmatic-preview.preview.emergentagent.com'
         error_msg = str(e).replace(' ', '_')
         return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error={error_msg[:100]}")
     

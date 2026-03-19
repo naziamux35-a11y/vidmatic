@@ -4,7 +4,7 @@
 
 **Redirect URI (Add this to Google Cloud Console):**
 ```
-https://video-wizard-dev.preview.emergentagent.com/api/youtube/oauth/callback
+https://vidmatic-preview.preview.emergentagent.com/api/youtube/oauth/callback
 ```
 
 ## Step-by-Step Setup
@@ -41,7 +41,7 @@ Visit: https://console.cloud.google.com
 - Name: **VIDMATIC Production**
 - Authorized redirect URIs - ADD THIS:
   ```
-  https://video-wizard-dev.preview.emergentagent.com/api/youtube/oauth/callback
+  https://vidmatic-preview.preview.emergentagent.com/api/youtube/oauth/callback
   ```
 - Click "CREATE"
 
@@ -65,7 +65,7 @@ sudo supervisorctl restart backend
 ## Testing
 
 ### 1. Login to VIDMATIC
-- Go to https://video-wizard-dev.preview.emergentagent.com/auth
+- Go to https://vidmatic-preview.preview.emergentagent.com/auth
 - Login with: `testuser@vidmatic.live` / `Test1234`
 
 ### 2. Connect YouTube Channel
@@ -80,7 +80,7 @@ sudo supervisorctl restart backend
 ### Error: redirect_uri_mismatch
 - Make sure the redirect URI in Google Cloud Console EXACTLY matches:
   ```
-  https://video-wizard-dev.preview.emergentagent.com/api/youtube/oauth/callback
+  https://vidmatic-preview.preview.emergentagent.com/api/youtube/oauth/callback
   ```
 - No trailing slashes!
 - Check for typos (emergentagent vs emergent)
