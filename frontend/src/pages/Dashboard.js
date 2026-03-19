@@ -46,6 +46,27 @@ const Dashboard = () => {
     }
   }, [user]);
   
+  // Handle YouTube OAuth callback results from URL params
+  useEffect(() => {
+    const searchParams = new URLSearchParams(location.search);
+    const youtubeConnected = searchParams.get('youtube_connected');
+    const youtubeError = searchParams.get('youtube_error');
+    const channelId = searchParams.get('channel_id');
+    
+    if (youtubeConnected === 'true') {
+      toast.success('YouTube channel connected successfully!');
+      fetchChannels(); // Refresh channels list
+      // Clean up URL params
+      window.history.replaceState({}, document.title, '/dashboard');
+    }
+    
+    if (youtubeError) {
+      toast.error(`YouTube connection failed: ${youtubeError.replace(/_/g, ' ')}`);
+      // Clean up URL params
+      window.history.replaceState({}, document.title, '/dashboard');
+    }
+  }, [location.search]);
+  
   const fetchChannels = async () => {
     try {
       const response = await api.get('/youtube/channels');
@@ -66,12 +87,10 @@ const Dashboard = () => {
   };
   
   const handleConnectChannel = () => {
-    // Construct the correct OAuth callback URL
-    const backendUrl = process.env.REACT_APP_BACKEND_URL;
-    const redirectUri = `${backendUrl}/api/youtube/oauth/callback`;
-    
-    api.post('/youtube/oauth/start', { redirect_uri: redirectUri })
+    // Start Composio OAuth flow
+    api.post('/youtube/oauth/start', {})
       .then(response => {
+        // Redirect to Composio authorization URL
         window.location.href = response.data.authorization_url;
       })
       .catch(error => {

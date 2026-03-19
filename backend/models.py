@@ -59,7 +59,7 @@ class Channel(BaseModel):
     channel_name: str
     channel_avatar: Optional[str] = None
     subscriber_count: Optional[int] = 0
-    refresh_token: str
+    composio_connection_id: Optional[str] = None  # Composio connection ID for OAuth
     connected_at: datetime
     is_active: bool = True
 

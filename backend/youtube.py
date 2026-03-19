@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -7,10 +8,10 @@ from models import User, Channel
 import os
 import uuid
 from datetime import datetime, timezone
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-import httpx
+from composio import Composio
+import logging
+
+logger = logging.getLogger(__name__)
 
 youtube_router = APIRouter()
 
@@ -18,12 +19,60 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-class OAuthStartRequest(BaseModel):
-    redirect_uri: str
+# Initialize Composio client
+COMPOSIO_API_KEY = os.environ.get('COMPOSIO_API_KEY', 'ak_Ppdy7XYc5YA9AXLUBK6E')
+composio_client = Composio(api_key=COMPOSIO_API_KEY)
 
-class OAuthCallbackRequest(BaseModel):
-    code: str
-    redirect_uri: str
+# Frontend URL for redirects
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://vidmatic-preview.preview.emergentagent.com')
+
+# YouTube Integration ID (created once and reused)
+YOUTUBE_INTEGRATION_ID = None
+
+async def get_or_create_youtube_integration():
+    """Get or create YouTube integration in Composio"""
+    global YOUTUBE_INTEGRATION_ID
+    
+    if YOUTUBE_INTEGRATION_ID:
+        return YOUTUBE_INTEGRATION_ID
+    
+    try:
+        # Check existing integrations
+        integrations = composio_client.integrations.get()
+        for integ in integrations:
+            if hasattr(integ, 'appName') and integ.appName == 'youtube':
+                YOUTUBE_INTEGRATION_ID = integ.id
+                logger.info(f"Found existing YouTube integration: {YOUTUBE_INTEGRATION_ID}")
+                return YOUTUBE_INTEGRATION_ID
+        
+        # Get YouTube app ID
+        apps = composio_client.apps.get()
+        youtube_app = None
+        for app in apps:
+            if getattr(app, 'key', '').lower() == 'youtube':
+                youtube_app = app
+                break
+        
+        if not youtube_app:
+            raise Exception("YouTube app not found in Composio")
+        
+        # Create new integration
+        integration = composio_client.integrations.create(
+            app_id=youtube_app.appId,
+            name='vidmatic_youtube',
+            use_composio_auth=True
+        )
+        
+        YOUTUBE_INTEGRATION_ID = integration.id
+        logger.info(f"Created new YouTube integration: {YOUTUBE_INTEGRATION_ID}")
+        return YOUTUBE_INTEGRATION_ID
+        
+    except Exception as e:
+        logger.error(f"Failed to get/create YouTube integration: {str(e)}")
+        raise
+
+class OAuthStartRequest(BaseModel):
+    redirect_uri: Optional[str] = None
 
 class UploadVideoRequest(BaseModel):
     channel_id: str
@@ -36,133 +85,175 @@ class UploadVideoRequest(BaseModel):
 
 @youtube_router.post("/oauth/start")
 async def start_oauth(req: OAuthStartRequest, user: User = Depends(get_current_user)):
-    """Start YouTube OAuth flow"""
-    client_config = {
-        "web": {
-            "client_id": os.environ.get('YOUTUBE_CLIENT_ID'),
-            "client_secret": os.environ.get('YOUTUBE_CLIENT_SECRET'),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [req.redirect_uri]
+    """Start YouTube OAuth flow using Composio"""
+    try:
+        # Get or create YouTube integration
+        integration_id = await get_or_create_youtube_integration()
+        
+        # Construct callback URL
+        callback_url = f"{FRONTEND_URL}/api/youtube/oauth/callback"
+        
+        # Initiate connection with Composio
+        connection = composio_client.connected_accounts.initiate(
+            integration_id=integration_id,
+            entity_id=user.user_id,  # Use our internal user ID
+            redirect_url=callback_url
+        )
+        
+        logger.info(f"Composio connection initiated for user {user.user_id}, connected_account_id: {connection.connectedAccountId}")
+        
+        # Store the pending connection in database for later verification
+        await db.pending_connections.update_one(
+            {"user_id": user.user_id, "connected_account_id": connection.connectedAccountId},
+            {
+                "$set": {
+                    "user_id": user.user_id,
+                    "connected_account_id": connection.connectedAccountId,
+                    "status": connection.connectionStatus,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+            },
+            upsert=True
+        )
+        
+        return {
+            "authorization_url": connection.redirectUrl,
+            "connection_id": connection.connectedAccountId,
+            "state": connection.connectedAccountId
         }
-    }
-    
-    flow = Flow.from_client_config(
-        client_config,
-        scopes=[
-            'https://www.googleapis.com/auth/youtube.upload',
-            'https://www.googleapis.com/auth/youtube.readonly',
-            'https://www.googleapis.com/auth/youtube.force-ssl'
-        ],
-        redirect_uri=req.redirect_uri
-    )
-    
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true',
-        prompt='consent'
-    )
-    
-    return {"authorization_url": authorization_url, "state": state}
+    except Exception as e:
+        logger.error(f"Failed to initiate Composio connection: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to start YouTube connection: {str(e)}")
 
 @youtube_router.get("/oauth/callback")
-async def oauth_callback(code: str, state: str = None, error: str = None, request: Request = None):
-    """Handle YouTube OAuth callback (GET request from Google)"""
-    # Handle OAuth errors from Google
+async def oauth_callback(
+    request: Request,
+    connectionId: str = Query(None, description="Composio connection ID"),
+    error: str = Query(None)
+):
+    """Handle YouTube OAuth callback from Composio"""
+    logger.info(f"OAuth callback received. connectionId: {connectionId}, error: {error}")
+    logger.info(f"Full query params: {dict(request.query_params)}")
+    
+    # Handle errors
     if error:
-        from fastapi.responses import RedirectResponse
-        frontend_url = 'https://vidmatic-preview.preview.emergentagent.com'
-        return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error={error}")
+        logger.error(f"OAuth error: {error}")
+        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error={error}")
     
-    if not code:
-        from fastapi.responses import RedirectResponse
-        frontend_url = 'https://vidmatic-preview.preview.emergentagent.com'
-        return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error=no_code_received")
-    
-    # Get redirect URI - must match exactly what was sent to Google
-    redirect_uri = 'https://vidmatic-preview.preview.emergentagent.com/api/youtube/oauth/callback'
-    
-    client_config = {
-        "web": {
-            "client_id": os.environ.get('YOUTUBE_CLIENT_ID'),
-            "client_secret": os.environ.get('YOUTUBE_CLIENT_SECRET'),
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [redirect_uri]
-        }
-    }
-    
-    flow = Flow.from_client_config(
-        client_config,
-        scopes=[
-            'https://www.googleapis.com/auth/youtube.upload',
-            'https://www.googleapis.com/auth/youtube.readonly',
-            'https://www.googleapis.com/auth/youtube.force-ssl'
-        ],
-        redirect_uri=redirect_uri
-    )
+    if not connectionId:
+        logger.error("No connectionId received in callback")
+        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_connection_id")
     
     try:
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
-    except Exception as e:
-        # Redirect back with error
-        from fastapi.responses import RedirectResponse
-        frontend_url = 'https://vidmatic-preview.preview.emergentagent.com'
-        error_msg = str(e).replace(' ', '_')
-        return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error={error_msg[:100]}")
-    
-    # Get channel info
-    try:
-        youtube = build('youtube', 'v3', credentials=credentials)
-        yt_request = youtube.channels().list(part='snippet,statistics', mine=True)
-        response = yt_request.execute()
+        # Get the connection details from Composio
+        connection = composio_client.connected_accounts.get(connection_id=connectionId)
         
-        if not response.get('items'):
-            # Redirect back to dashboard with error
-            from fastapi.responses import RedirectResponse
-            frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:3000').replace('/api', '')
-            return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error=no_channel")
+        if not connection:
+            logger.error(f"Connection not found: {connectionId}")
+            return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=connection_not_found")
         
-        channel_data = response['items'][0]
-        youtube_channel_id = channel_data['id']
+        logger.info(f"Connection status: {connection}")
         
-        # Store channel temporarily in a session or state (for now, we'll use query params)
-        # In production, you'd want to use a session store or JWT
+        # Get connection details
+        connection_dict = connection.__dict__ if hasattr(connection, '__dict__') else {}
+        entity_id = connection_dict.get('entityId') or connection_dict.get('entity_id')
+        status = connection_dict.get('status', 'unknown')
         
-        # For now, redirect back with success
-        from fastapi.responses import RedirectResponse
-        frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:3000').replace('/api', '')
+        logger.info(f"Connection entity_id: {entity_id}, status: {status}")
         
-        # Store credentials temporarily (in production, use proper session management)
-        # For now, we'll create the channel record directly
+        if not entity_id:
+            # Try to find the user from pending connections
+            pending = await db.pending_connections.find_one({"connected_account_id": connectionId})
+            if pending:
+                entity_id = pending.get("user_id")
+                logger.info(f"Found entity_id from pending connections: {entity_id}")
         
-        # Get user from session - this is a simplified approach
-        # In production, you'd maintain session state through the OAuth flow
+        if not entity_id:
+            logger.error("No entity_id found")
+            return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_user_found")
+        
+        # Get channel info
+        channel_name = "YouTube Channel"
+        channel_avatar = None
+        subscriber_count = 0
+        youtube_channel_id = connectionId
+        
+        # Try to get channel info from the connection metadata
+        if hasattr(connection, 'metadata') and connection.metadata:
+            meta = connection.metadata
+            channel_name = meta.get('channel_name', meta.get('title', 'YouTube Channel'))
+            channel_avatar = meta.get('channel_avatar', meta.get('thumbnail'))
+            subscriber_count = int(meta.get('subscriber_count', 0))
+            youtube_channel_id = meta.get('youtube_channel_id', connectionId)
+        
+        # Create or update channel record in database
         channel_id = f"ch_{uuid.uuid4().hex[:12]}"
         channel_doc = {
             "channel_id": channel_id,
-            "user_id": "temp_user",  # This should be from session
+            "user_id": entity_id,
             "youtube_channel_id": youtube_channel_id,
-            "channel_name": channel_data['snippet']['title'],
-            "channel_avatar": channel_data['snippet']['thumbnails']['default']['url'],
-            "subscriber_count": int(channel_data['statistics'].get('subscriberCount', 0)),
-            "refresh_token": credentials.refresh_token or credentials.token,
+            "channel_name": channel_name,
+            "channel_avatar": channel_avatar,
+            "subscriber_count": subscriber_count,
+            "composio_connection_id": connectionId,
             "connected_at": datetime.now(timezone.utc).isoformat(),
             "is_active": True
         }
         
-        # Store in database
-        await db.channels.insert_one(channel_doc)
+        # Check if channel already exists for this user with this connection
+        existing_channel = await db.channels.find_one({
+            "user_id": entity_id,
+            "composio_connection_id": connectionId
+        })
+        
+        if existing_channel:
+            await db.channels.update_one(
+                {"_id": existing_channel["_id"]},
+                {"$set": {
+                    "channel_name": channel_name,
+                    "channel_avatar": channel_avatar,
+                    "subscriber_count": subscriber_count,
+                    "is_active": True,
+                    "connected_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            channel_id = existing_channel["channel_id"]
+            logger.info(f"Updated existing channel: {channel_id}")
+        else:
+            await db.channels.insert_one(channel_doc)
+            logger.info(f"Created new channel: {channel_id}")
+        
+        # Clean up pending connection
+        await db.pending_connections.delete_one({"connected_account_id": connectionId})
         
         # Redirect back to dashboard with success
-        return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_connected=true&channel_id={youtube_channel_id}")
+        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_connected=true&channel_id={channel_id}")
         
     except Exception as e:
-        # Redirect back with error
-        from fastapi.responses import RedirectResponse
-        frontend_url = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:3000').replace('/api', '')
-        return RedirectResponse(url=f"{frontend_url}/dashboard?youtube_error={str(e)}")
+        logger.error(f"Error processing callback: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        error_msg = str(e).replace(' ', '_')[:100]
+        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error={error_msg}")
+
+@youtube_router.get("/connection/status/{connection_id}")
+async def check_connection_status(connection_id: str, user: User = Depends(get_current_user)):
+    """Check the status of a Composio connection"""
+    try:
+        connection = composio_client.connected_accounts.get(connection_id=connection_id)
+        connection_dict = connection.__dict__ if hasattr(connection, '__dict__') else {}
+        
+        return {
+            "connection_id": connection_id,
+            "status": connection_dict.get('status', 'unknown'),
+            "entity_id": connection_dict.get('entityId'),
+            "details": connection_dict
+        }
+    except Exception as e:
+        logger.error(f"Failed to check connection status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to check connection: {str(e)}")
 
 @youtube_router.get("/channels")
 async def get_channels(user: User = Depends(get_current_user)):
@@ -173,6 +264,12 @@ async def get_channels(user: User = Depends(get_current_user)):
 @youtube_router.delete("/channels/{channel_id}")
 async def disconnect_channel(channel_id: str, user: User = Depends(get_current_user)):
     """Disconnect a YouTube channel"""
+    channel = await db.channels.find_one({"channel_id": channel_id, "user_id": user.user_id})
+    
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    # Deactivate in our database
     result = await db.channels.update_one(
         {"channel_id": channel_id, "user_id": user.user_id},
         {"$set": {"is_active": False}}
@@ -183,11 +280,126 @@ async def disconnect_channel(channel_id: str, user: User = Depends(get_current_u
     
     return {"message": "Channel disconnected"}
 
+@youtube_router.get("/channels/{channel_id}/stats")
+async def get_channel_stats(channel_id: str, user: User = Depends(get_current_user)):
+    """Get channel statistics using Composio"""
+    channel = await db.channels.find_one({
+        "channel_id": channel_id, 
+        "user_id": user.user_id,
+        "is_active": True
+    })
+    
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    composio_connection_id = channel.get("composio_connection_id")
+    
+    if not composio_connection_id:
+        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
+    
+    try:
+        # Get entity for this connection
+        entity = composio_client.get_entity(id=channel.get("user_id"))
+        
+        # Execute get channel statistics action
+        result = entity.execute(
+            action="YOUTUBE_GET_CHANNEL_STATISTICS",
+            params={},
+            connected_account_id=composio_connection_id
+        )
+        
+        if result:
+            return result
+        
+        return {
+            "channel_id": channel_id,
+            "subscriber_count": channel.get("subscriber_count", 0),
+            "message": "Using cached data"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get channel stats: {str(e)}")
+        return {
+            "channel_id": channel_id,
+            "subscriber_count": channel.get("subscriber_count", 0),
+            "error": str(e)
+        }
+
 @youtube_router.post("/upload")
 async def upload_video(req: UploadVideoRequest, user: User = Depends(get_current_user)):
-    """Upload video to YouTube (placeholder - actual upload happens in background)"""
-    # This is a simplified version - actual implementation would be in background task
-    return {
-        "message": "Video upload initiated",
-        "status": "processing"
-    }
+    """Upload video to YouTube using Composio"""
+    channel = await db.channels.find_one({
+        "channel_id": req.channel_id, 
+        "user_id": user.user_id,
+        "is_active": True
+    })
+    
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    composio_connection_id = channel.get("composio_connection_id")
+    
+    if not composio_connection_id:
+        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
+    
+    try:
+        # Get entity for this connection
+        entity = composio_client.get_entity(id=user.user_id)
+        
+        # Execute upload video action
+        result = entity.execute(
+            action="YOUTUBE_UPLOAD_VIDEO",
+            params={
+                "file_path": req.video_file_path,
+                "title": req.title,
+                "description": req.description,
+                "tags": req.tags
+            },
+            connected_account_id=composio_connection_id
+        )
+        
+        return {
+            "message": "Video upload initiated",
+            "status": "processing",
+            "result": result
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to upload video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload video: {str(e)}")
+
+@youtube_router.get("/channels/{channel_id}/videos")
+async def list_channel_videos(channel_id: str, user: User = Depends(get_current_user)):
+    """List videos from a channel using Composio"""
+    channel = await db.channels.find_one({
+        "channel_id": channel_id, 
+        "user_id": user.user_id,
+        "is_active": True
+    })
+    
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    composio_connection_id = channel.get("composio_connection_id")
+    
+    if not composio_connection_id:
+        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
+    
+    try:
+        # Get entity for this connection
+        entity = composio_client.get_entity(id=user.user_id)
+        
+        # Execute list videos action
+        result = entity.execute(
+            action="YOUTUBE_LIST_CHANNEL_VIDEOS",
+            params={},
+            connected_account_id=composio_connection_id
+        )
+        
+        return {
+            "videos": result if result else []
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to list videos: {str(e)}")
+        return {"videos": [], "error": str(e)}
