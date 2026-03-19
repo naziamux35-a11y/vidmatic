@@ -8,7 +8,7 @@ from models import User, Channel
 import os
 import uuid
 from datetime import datetime, timezone
-from composio import Composio
+from composio import Composio, Action
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,85 @@ FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://vidmatic-preview.preview.
 
 # YouTube Integration ID (created once and reused)
 YOUTUBE_INTEGRATION_ID = None
+
+async def fetch_youtube_channel_details(user_id: str, composio_connection_id: str):
+    """Fetch actual YouTube channel details using Composio"""
+    try:
+        entity = composio_client.get_entity(id=user_id)
+        
+        # First get user's playlists to find channel ID
+        playlists_result = entity.execute(
+            action=Action.YOUTUBE_LIST_USER_PLAYLISTS,
+            params={},
+            connected_account_id=composio_connection_id
+        )
+        
+        if not playlists_result or not playlists_result.get('data'):
+            logger.warning("No playlists found for channel")
+            return None
+        
+        # Extract channel ID from first playlist
+        items = playlists_result['data'].get('items', [])
+        if not items:
+            logger.warning("No items in playlists response")
+            return None
+        
+        youtube_channel_id = items[0].get('snippet', {}).get('channelId')
+        channel_title = items[0].get('snippet', {}).get('channelTitle', 'YouTube Channel')
+        
+        if not youtube_channel_id:
+            logger.warning("Could not extract channel ID from playlists")
+            return None
+        
+        # Now get full channel statistics
+        stats_result = entity.execute(
+            action=Action.YOUTUBE_GET_CHANNEL_STATISTICS,
+            params={
+                'id': youtube_channel_id,
+                'part': 'snippet,statistics'
+            },
+            connected_account_id=composio_connection_id
+        )
+        
+        if not stats_result or not stats_result.get('data'):
+            logger.warning("Could not get channel statistics")
+            return {
+                'youtube_channel_id': youtube_channel_id,
+                'channel_name': channel_title,
+                'channel_avatar': None,
+                'subscriber_count': 0,
+                'video_count': 0,
+                'view_count': 0,
+                'custom_url': None,
+                'description': None
+            }
+        
+        # Extract channel details
+        channels = stats_result['data'].get('channels', stats_result['data'].get('items', []))
+        if not channels:
+            return None
+        
+        channel_data = channels[0]
+        snippet = channel_data.get('snippet', {})
+        statistics = channel_data.get('statistics', {})
+        thumbnails = snippet.get('thumbnails', {})
+        
+        return {
+            'youtube_channel_id': youtube_channel_id,
+            'channel_name': snippet.get('title', channel_title),
+            'channel_avatar': thumbnails.get('medium', thumbnails.get('default', {})).get('url'),
+            'subscriber_count': int(statistics.get('subscriberCount', 0)),
+            'video_count': int(statistics.get('videoCount', 0)),
+            'view_count': int(statistics.get('viewCount', 0)),
+            'custom_url': snippet.get('customUrl'),
+            'description': snippet.get('description', '')[:200] if snippet.get('description') else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching YouTube channel details: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 async def get_or_create_youtube_integration():
     """Get or create YouTube integration in Composio"""
@@ -181,21 +260,31 @@ async def oauth_callback(
             logger.error("No entity_id found")
             return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_user_found")
         
-        # Get channel info - use connection data
-        channel_name = "YouTube Channel"
-        channel_avatar = None
-        subscriber_count = 0
-        youtube_channel_id = connection_id
+        # Fetch actual YouTube channel details
+        logger.info(f"Fetching YouTube channel details for user {entity_id}")
+        channel_details = await fetch_youtube_channel_details(entity_id, connection_id)
         
-        # Try to get info from connection
-        if hasattr(connection, 'connectionParams') and connection.connectionParams:
-            params = connection.connectionParams
-            if hasattr(params, 'scope'):
-                logger.info(f"Connection scope: {params.scope}")
-        
-        # Check if there's account info in connected_account_id's metadata
-        # For now, we'll use a default name that user can update later
-        # We could also try to fetch channel details using the connection
+        if channel_details:
+            youtube_channel_id = channel_details['youtube_channel_id']
+            channel_name = channel_details['channel_name']
+            channel_avatar = channel_details['channel_avatar']
+            subscriber_count = channel_details['subscriber_count']
+            video_count = channel_details.get('video_count', 0)
+            view_count = channel_details.get('view_count', 0)
+            custom_url = channel_details.get('custom_url')
+            description = channel_details.get('description')
+            logger.info(f"Got channel details: {channel_name} ({youtube_channel_id})")
+        else:
+            # Fallback to defaults if we couldn't fetch details
+            youtube_channel_id = connection_id
+            channel_name = "YouTube Channel"
+            channel_avatar = "https://www.youtube.com/img/desktop/yt_1200.png"
+            subscriber_count = 0
+            video_count = 0
+            view_count = 0
+            custom_url = None
+            description = None
+            logger.warning("Could not fetch channel details, using defaults")
         
         # Create or update channel record in database
         channel_id = f"ch_{uuid.uuid4().hex[:12]}"
@@ -203,9 +292,13 @@ async def oauth_callback(
             "channel_id": channel_id,
             "user_id": entity_id,
             "youtube_channel_id": youtube_channel_id,
-            "channel_name": f"Connected YouTube Channel",  # User can rename later
-            "channel_avatar": "https://www.youtube.com/img/desktop/yt_1200.png",  # Default YT avatar
+            "channel_name": channel_name,
+            "channel_avatar": channel_avatar,
             "subscriber_count": subscriber_count,
+            "video_count": video_count,
+            "view_count": view_count,
+            "custom_url": custom_url,
+            "description": description,
             "composio_connection_id": connection_id,
             "connection_status": conn_status,
             "connected_at": datetime.now(timezone.utc).isoformat(),
@@ -222,9 +315,15 @@ async def oauth_callback(
             await db.channels.update_one(
                 {"_id": existing_channel["_id"]},
                 {"$set": {
+                    "youtube_channel_id": youtube_channel_id,
                     "channel_name": channel_name,
                     "channel_avatar": channel_avatar,
                     "subscriber_count": subscriber_count,
+                    "video_count": video_count,
+                    "view_count": view_count,
+                    "custom_url": custom_url,
+                    "description": description,
+                    "connection_status": conn_status,
                     "is_active": True,
                     "connected_at": datetime.now(timezone.utc).isoformat()
                 }}
@@ -270,6 +369,49 @@ async def get_channels(user: User = Depends(get_current_user)):
     """Get user's connected YouTube channels"""
     channels = await db.channels.find({"user_id": user.user_id, "is_active": True}, {"_id": 0}).to_list(100)
     return channels
+
+@youtube_router.post("/channels/{channel_id}/sync")
+async def sync_channel_details(channel_id: str, user: User = Depends(get_current_user)):
+    """Refresh/sync channel details from YouTube"""
+    channel = await db.channels.find_one({
+        "channel_id": channel_id, 
+        "user_id": user.user_id,
+        "is_active": True
+    })
+    
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    composio_connection_id = channel.get("composio_connection_id")
+    
+    if not composio_connection_id:
+        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
+    
+    # Fetch fresh channel details
+    channel_details = await fetch_youtube_channel_details(user.user_id, composio_connection_id)
+    
+    if not channel_details:
+        raise HTTPException(status_code=500, detail="Could not fetch channel details from YouTube")
+    
+    # Update channel in database
+    await db.channels.update_one(
+        {"channel_id": channel_id},
+        {"$set": {
+            "youtube_channel_id": channel_details['youtube_channel_id'],
+            "channel_name": channel_details['channel_name'],
+            "channel_avatar": channel_details['channel_avatar'],
+            "subscriber_count": channel_details['subscriber_count'],
+            "video_count": channel_details.get('video_count', 0),
+            "view_count": channel_details.get('view_count', 0),
+            "custom_url": channel_details.get('custom_url'),
+            "description": channel_details.get('description'),
+            "last_synced_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Return updated channel
+    updated_channel = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    return updated_channel
 
 @youtube_router.delete("/channels/{channel_id}")
 async def disconnect_channel(channel_id: str, user: User = Depends(get_current_user)):

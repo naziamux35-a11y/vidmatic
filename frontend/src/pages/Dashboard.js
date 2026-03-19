@@ -250,26 +250,46 @@ const Dashboard = () => {
                     <p className="text-sm text-zinc-400 mb-8">Link your YouTube account via Google OAuth to enable automatic uploading and scheduling.</p>
                     
                     {channels.length > 0 && (
-                      <div className="space-y-3 text-left mb-6">
+                      <div className="space-y-4 text-left mb-6">
                         {channels.map(channel => (
-                          <div key={channel.channel_id} className="flex items-center justify-between p-4 rounded-xl border border-emerald-700/50 bg-emerald-900/20">
-                            <div className="flex items-center gap-3">
+                          <div key={channel.channel_id} className="p-4 rounded-xl border border-emerald-600/40 bg-gradient-to-r from-emerald-950/50 to-zinc-900/50 shadow-lg">
+                            <div className="flex items-start gap-4">
                               <img 
                                 src={channel.channel_avatar || 'https://www.youtube.com/img/desktop/yt_1200.png'} 
                                 alt={channel.channel_name} 
-                                className="w-10 h-10 rounded-full object-cover bg-zinc-700"
+                                className="w-14 h-14 rounded-full object-cover border-2 border-emerald-500/50 shadow-md"
                                 onError={(e) => {
                                   e.target.src = 'https://www.youtube.com/img/desktop/yt_1200.png';
                                 }}
                               />
-                              <div>
-                                <p className="text-sm font-medium text-white">{channel.channel_name}</p>
-                                <p className="text-xs text-emerald-400">
-                                  {channel.connection_status === 'ACTIVE' ? '● Connected' : 'Connected'}
-                                </p>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between mb-1">
+                                  <h4 className="text-base font-semibold text-white truncate">{channel.channel_name}</h4>
+                                  <span className="flex items-center gap-1 text-xs font-medium text-emerald-400 bg-emerald-500/20 px-2 py-1 rounded-full">
+                                    <CheckCircle className="w-3 h-3" /> Connected
+                                  </span>
+                                </div>
+                                {channel.custom_url && (
+                                  <p className="text-xs text-zinc-400 mb-2">{channel.custom_url}</p>
+                                )}
+                                <div className="flex items-center gap-4 mt-2">
+                                  <div className="text-center">
+                                    <p className="text-lg font-bold text-white">{channel.subscriber_count?.toLocaleString() || 0}</p>
+                                    <p className="text-xs text-zinc-500">Subscribers</p>
+                                  </div>
+                                  <div className="w-px h-8 bg-zinc-700"></div>
+                                  <div className="text-center">
+                                    <p className="text-lg font-bold text-white">{channel.video_count?.toLocaleString() || 0}</p>
+                                    <p className="text-xs text-zinc-500">Videos</p>
+                                  </div>
+                                  <div className="w-px h-8 bg-zinc-700"></div>
+                                  <div className="text-center">
+                                    <p className="text-lg font-bold text-white">{channel.view_count?.toLocaleString() || 0}</p>
+                                    <p className="text-xs text-zinc-500">Views</p>
+                                  </div>
+                                </div>
                               </div>
                             </div>
-                            <CheckCircle className="w-6 h-6 text-emerald-400" />
                           </div>
                         ))}
                       </div>
@@ -277,20 +297,38 @@ const Dashboard = () => {
                     
                     <Button 
                       onClick={handleConnectChannel}
-                      className="w-full bg-zinc-100 hover:bg-white text-zinc-900 font-medium py-3 rounded-xl"
+                      variant={channels.length > 0 ? "outline" : "default"}
+                      className={channels.length > 0 
+                        ? "w-full border-zinc-600 text-zinc-300 hover:bg-zinc-800 font-medium py-3 rounded-xl" 
+                        : "w-full bg-zinc-100 hover:bg-white text-zinc-900 font-medium py-3 rounded-xl"
+                      }
                       data-testid="connect-youtube-btn"
                     >
-                      Connect New Channel
+                      {channels.length > 0 ? 'Connect Another Channel' : 'Connect New Channel'}
                     </Button>
                     
-                    <div className="mt-8 flex justify-end">
-                      <Button 
-                        onClick={() => setCurrentStep(2)}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2 rounded-lg"
-                      >
-                        Continue <ArrowRight className="w-4 h-4 ml-2" />
-                      </Button>
-                    </div>
+                    {channels.length > 0 && (
+                      <div className="mt-8 flex justify-end">
+                        <Button 
+                          onClick={() => setCurrentStep(2)}
+                          className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2 rounded-lg"
+                        >
+                          Continue to Create Video <ArrowRight className="w-4 h-4 ml-2" />
+                        </Button>
+                      </div>
+                    )}
+                    
+                    {channels.length === 0 && (
+                      <div className="mt-8 flex justify-end">
+                        <Button 
+                          onClick={() => setCurrentStep(2)}
+                          variant="ghost"
+                          className="text-zinc-400 hover:text-white"
+                        >
+                          Skip for now <ArrowRight className="w-4 h-4 ml-2" />
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 )}
                 
