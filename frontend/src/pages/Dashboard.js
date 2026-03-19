@@ -421,7 +421,7 @@ const Dashboard = () => {
                   <button
                     onClick={() => {
                       if (step.number === 1) setCurrentStep(1);
-                      else if (step.number === 2 && channels.length > 0) setCurrentStep(2);
+                      else if (step.number === 2) setCurrentStep(2);  // Allow access to Create without channel
                       else if (step.number === 3 && currentVideo?.status === 'ready') setCurrentStep(3);
                       else if (step.number === 4 && currentVideo?.status === 'ready') setCurrentStep(4);
                     }}
@@ -519,10 +519,14 @@ const Dashboard = () => {
                   {channels.length > 0 ? 'Connect Another Channel' : 'Connect YouTube Channel'}
                 </Button>
                 
-                {channels.length > 0 && (
-                  <Button onClick={() => setCurrentStep(2)} className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl">
-                    Continue to Create Video <ArrowRight className="w-4 h-4 ml-2" />
-                  </Button>
+                <Button onClick={() => setCurrentStep(2)} className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl">
+                  {channels.length > 0 ? 'Continue to Create Video' : 'Skip & Create Video'} <ArrowRight className="w-4 h-4 ml-2" />
+                </Button>
+                
+                {channels.length === 0 && (
+                  <p className="text-xs text-zinc-500 mt-2 text-center">
+                    You can connect a channel later when you're ready to publish
+                  </p>
                 )}
               </div>
             )}
@@ -857,34 +861,49 @@ const Dashboard = () => {
                     {/* Channel Selection */}
                     <div>
                       <label className="block text-sm font-medium mb-3">Publish to Channel</label>
-                      <div className="space-y-2">
-                        {channels.map(channel => (
-                          <button
-                            key={channel.channel_id}
-                            onClick={() => setSelectedChannel(channel.channel_id)}
-                            className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all ${
-                              selectedChannel === channel.channel_id 
-                                ? 'border-indigo-500 bg-indigo-600/10' 
-                                : 'border-zinc-700 hover:border-zinc-600'
-                            }`}
+                      {channels.length === 0 ? (
+                        <div className="p-4 rounded-xl border border-yellow-600/40 bg-yellow-950/20 text-center">
+                          <Youtube className="w-8 h-8 text-yellow-500 mx-auto mb-2" />
+                          <p className="text-sm text-yellow-200 mb-3">No YouTube channel connected</p>
+                          <Button 
+                            onClick={handleConnectChannel}
+                            className="bg-red-600 hover:bg-red-500 text-white"
                           >
-                            <img 
-                              src={channel.channel_avatar || 'https://www.youtube.com/img/desktop/yt_1200.png'} 
-                              alt={channel.channel_name}
-                              className="w-10 h-10 rounded-full"
-                            />
-                            <div className="flex-1 text-left">
-                              <p className="font-medium">{channel.channel_name}</p>
-                              <p className="text-xs text-zinc-500">{channel.subscriber_count?.toLocaleString()} subscribers</p>
-                            </div>
-                            {selectedChannel === channel.channel_id && (
-                              <CheckCircle className="w-5 h-5 text-indigo-400" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
+                            Connect YouTube Channel
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {channels.map(channel => (
+                            <button
+                              key={channel.channel_id}
+                              onClick={() => setSelectedChannel(channel.channel_id)}
+                              className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                                selectedChannel === channel.channel_id 
+                                  ? 'border-indigo-500 bg-indigo-600/10' 
+                                  : 'border-zinc-700 hover:border-zinc-600'
+                              }`}
+                            >
+                              <img 
+                                src={channel.channel_avatar || 'https://www.youtube.com/img/desktop/yt_1200.png'} 
+                                alt={channel.channel_name}
+                                className="w-10 h-10 rounded-full"
+                              />
+                              <div className="flex-1 text-left">
+                                <p className="font-medium">{channel.channel_name}</p>
+                                <p className="text-xs text-zinc-500">{channel.subscriber_count?.toLocaleString()} subscribers</p>
+                              </div>
+                              {selectedChannel === channel.channel_id && (
+                                <CheckCircle className="w-5 h-5 text-indigo-400" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     
+                    {channels.length > 0 && (
+                    <>
                     {/* Publish Options */}
                     <div>
                       <label className="block text-sm font-medium mb-3">When to Publish</label>
@@ -935,6 +954,8 @@ const Dashboard = () => {
                         )}
                       </div>
                     </div>
+                    </>
+                    )}
                   </div>
                 </div>
                 
@@ -942,17 +963,27 @@ const Dashboard = () => {
                   <Button variant="ghost" onClick={() => setCurrentStep(3)} className="text-zinc-400">
                     <ArrowLeft className="w-4 h-4 mr-2" /> Back to Edit
                   </Button>
-                  <Button 
-                    onClick={handlePublish}
-                    disabled={!selectedChannel}
-                    className="bg-emerald-600 hover:bg-emerald-500 px-8 py-3"
-                  >
-                    {publishNow ? (
-                      <><Send className="w-4 h-4 mr-2" /> Publish Now</>
-                    ) : (
-                      <><Calendar className="w-4 h-4 mr-2" /> Schedule Video</>
-                    )}
-                  </Button>
+                  {channels.length > 0 ? (
+                    <Button 
+                      onClick={handlePublish}
+                      disabled={!selectedChannel}
+                      className="bg-emerald-600 hover:bg-emerald-500 px-8 py-3"
+                    >
+                      {publishNow ? (
+                        <><Send className="w-4 h-4 mr-2" /> Publish Now</>
+                      ) : (
+                        <><Calendar className="w-4 h-4 mr-2" /> Schedule Video</>
+                      )}
+                    </Button>
+                  ) : (
+                    <Button 
+                      onClick={() => navigate('/library')}
+                      variant="outline"
+                      className="border-zinc-600"
+                    >
+                      Save to Library
+                    </Button>
+                  )}
                 </div>
               </div>
             )}
