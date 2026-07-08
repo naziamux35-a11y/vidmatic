@@ -15,6 +15,9 @@ import { Textarea } from '../components/ui/textarea';
 import { Input } from '../components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const mediaUrl = (u) => (u && u.startsWith('/') ? `${BACKEND_URL}${u}` : u);
+
 const Dashboard = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -49,6 +52,8 @@ const Dashboard = () => {
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTime, setScheduleTime] = useState('');
   const [publishNow, setPublishNow] = useState(true);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishResult, setPublishResult] = useState(null);
   
   // Audio player state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -107,6 +112,25 @@ const Dashboard = () => {
       }
     };
   }, []);
+
+  // Handle "Edit" from Library
+  useEffect(() => {
+    const editVideo = location.state?.editVideo;
+    if (editVideo?.video_id) {
+      api.get(`/videos/${editVideo.video_id}`)
+        .then(res => {
+          const v = res.data;
+          setCurrentVideo(v);
+          setEditedTitle(v.title || '');
+          setEditedDescription(v.description || '');
+          setEditedTags(v.tags || []);
+          setSelectedThumbnail(v.selected_thumbnail_url);
+          setCurrentStep(3);
+        })
+        .catch(() => toast.error('Failed to load video'));
+      window.history.replaceState({}, document.title, '/dashboard');
+    }
+  }, [location.state]);
   
   const fetchChannels = async () => {
     try {
@@ -265,31 +289,62 @@ const Dashboard = () => {
       toast.error('Please select a channel to publish to');
       return;
     }
+    if (!publishNow && (!scheduleDate || !scheduleTime)) {
+      toast.error('Please pick a date and time for scheduling');
+      return;
+    }
 
     try {
       const publishData = {
         channel_id: selectedChannel,
         publish_now: publishNow
       };
-
-      if (!publishNow && scheduleDate && scheduleTime) {
+      if (!publishNow) {
         publishData.scheduled_at = `${scheduleDate}T${scheduleTime}:00Z`;
       }
 
+      setIsPublishing(true);
       const response = await api.post(`/videos/${currentVideo.video_id}/publish`, publishData);
-      
       toast.success(response.data.message);
-      
-      // Reset for new video
-      setCurrentVideo(null);
-      setVideoPrompt('');
-      setCurrentStep(1);
-      fetchUserVideos();
-      
+
+      // Poll until upload to YouTube completes
+      pollIntervalRef.current = setInterval(async () => {
+        try {
+          const res = await api.get(`/videos/${currentVideo.video_id}`);
+          const v = res.data;
+          if (v.status === 'published' || v.status === 'scheduled') {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+            setIsPublishing(false);
+            setPublishResult(v);
+            fetchUserVideos();
+          } else if (v.status === 'ready' && v.publish_error) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+            setIsPublishing(false);
+            toast.error(`YouTube upload failed: ${v.publish_error}`);
+          }
+        } catch (e) {
+          console.error('Publish poll error:', e);
+        }
+      }, 4000);
     } catch (error) {
+      setIsPublishing(false);
       const message = error.response?.data?.detail || 'Failed to publish video';
       toast.error(message);
     }
+  };
+
+  const resetWizard = () => {
+    setCurrentVideo(null);
+    setPublishResult(null);
+    setVideoPrompt('');
+    setEditedTitle('');
+    setEditedDescription('');
+    setEditedTags([]);
+    setSelectedThumbnail(null);
+    setCurrentStep(1);
+    fetchUserVideos();
   };
 
   const toggleAudio = () => {
@@ -566,9 +621,10 @@ const Dashboard = () => {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent className="bg-zinc-800 border-zinc-700">
-                            <SelectItem value="short">Short (~ 1 min)</SelectItem>
-                            <SelectItem value="medium">Medium (5-8 min)</SelectItem>
-                            <SelectItem value="long">Long (10-15 min)</SelectItem>
+                            <SelectItem value="short">Short (~1 min)</SelectItem>
+                            <SelectItem value="medium">Medium (2-5 min)</SelectItem>
+                            <SelectItem value="long">Long (5-8 min)</SelectItem>
+                            <SelectItem value="extended">Extended (10-15 min)</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -654,23 +710,34 @@ const Dashboard = () => {
                 </div>
                 <p className="text-sm text-zinc-500">{generationProgress}% complete</p>
                 
-                <div className="mt-8 grid grid-cols-5 gap-2">
-                  {['Script', 'Footage', 'Voice', 'Thumbnails', 'SEO'].map((step, i) => (
-                    <div key={step} className="text-center">
-                      <div className={`w-8 h-8 rounded-full mx-auto mb-1 flex items-center justify-center ${
-                        generationProgress > (i + 1) * 20 ? 'bg-emerald-600' : 
-                        generationProgress > i * 20 ? 'bg-indigo-600 animate-pulse' : 'bg-zinc-800'
-                      }`}>
-                        {generationProgress > (i + 1) * 20 ? (
-                          <CheckCircle className="w-4 h-4" />
-                        ) : (
-                          <span className="text-xs">{i + 1}</span>
-                        )}
+                <div className="mt-8 grid grid-cols-6 gap-2">
+                  {[
+                    { label: 'Script', at: 8 },
+                    { label: 'Footage', at: 24 },
+                    { label: 'Voice', at: 42 },
+                    { label: 'Thumbs', at: 64 },
+                    { label: 'SEO', at: 76 },
+                    { label: 'Render', at: 82 }
+                  ].map((step, i, arr) => {
+                    const nextAt = arr[i + 1]?.at ?? 100;
+                    return (
+                      <div key={step.label} className="text-center">
+                        <div className={`w-8 h-8 rounded-full mx-auto mb-1 flex items-center justify-center ${
+                          generationProgress >= nextAt ? 'bg-emerald-600' : 
+                          generationProgress >= step.at ? 'bg-indigo-600 animate-pulse' : 'bg-zinc-800'
+                        }`}>
+                          {generationProgress >= nextAt ? (
+                            <CheckCircle className="w-4 h-4" />
+                          ) : (
+                            <span className="text-xs">{i + 1}</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-zinc-500">{step.label}</span>
                       </div>
-                      <span className="text-xs text-zinc-500">{step}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
+                <p className="text-xs text-zinc-600 mt-6">Rendering a full HD video takes a few minutes — feel free to keep this tab open.</p>
               </div>
             )}
 
@@ -690,6 +757,42 @@ const Dashboard = () => {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   {/* Left: Preview */}
                   <div className="space-y-4">
+                    {/* Rendered Video Preview */}
+                    {currentVideo.video_url && (
+                      <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <label className="text-sm font-medium">Video Preview</label>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-zinc-600 h-8"
+                            onClick={() => {
+                              const link = document.createElement('a');
+                              link.href = mediaUrl(currentVideo.download_url || currentVideo.video_url);
+                              link.download = `${currentVideo.title || currentVideo.video_id}.mp4`;
+                              document.body.appendChild(link);
+                              link.click();
+                              document.body.removeChild(link);
+                            }}
+                            data-testid="step3-download-btn"
+                          >
+                            <Download className="w-3 h-3 mr-1" /> Download MP4
+                          </Button>
+                        </div>
+                        <video
+                          controls
+                          className="w-full aspect-video rounded-xl bg-black border border-zinc-800"
+                          src={mediaUrl(currentVideo.video_url)}
+                          data-testid="step3-video-player"
+                        />
+                        {(currentVideo.rendered_duration > 0 || currentVideo.file_size_mb > 0) && (
+                          <p className="text-xs text-zinc-500 mt-1">
+                            {currentVideo.rendered_duration ? `${Math.floor(currentVideo.rendered_duration / 60)}:${String(Math.round(currentVideo.rendered_duration % 60)).padStart(2, '0')} min` : ''}
+                            {currentVideo.file_size_mb ? ` · ${currentVideo.file_size_mb} MB · 1080p HD` : ''}
+                          </p>
+                        )}
+                      </div>
+                    )}
                     {/* Thumbnail Selection */}
                     <div>
                       <label className="block text-sm font-medium mb-3">Select Thumbnail</label>
@@ -735,7 +838,7 @@ const Dashboard = () => {
                             {Math.round(currentVideo.voiceover_duration || 0)} min
                           </span>
                         </div>
-                        <audio ref={audioRef} src={currentVideo.voiceover_url} onEnded={() => setIsPlaying(false)} />
+                        <audio ref={audioRef} src={mediaUrl(currentVideo.voiceover_url)} onEnded={() => setIsPlaying(false)} />
                       </div>
                     )}
                     
@@ -824,8 +927,54 @@ const Dashboard = () => {
               </div>
             )}
 
+            {/* ===== STEP 4: PUBLISHING IN PROGRESS ===== */}
+            {currentStep === 4 && isPublishing && (
+              <div className="text-center max-w-lg mx-auto py-16" data-testid="publishing-progress">
+                <div className="w-20 h-20 rounded-full bg-red-600/20 flex items-center justify-center mx-auto mb-6 animate-pulse">
+                  <Youtube className="w-10 h-10 text-red-500" />
+                </div>
+                <h2 className="text-2xl font-bold mb-2">Uploading to YouTube</h2>
+                <p className="text-zinc-400 mb-6">Your HD video is being uploaded to your channel. This can take a few minutes depending on video size.</p>
+                <Loader2 className="w-8 h-8 animate-spin text-indigo-400 mx-auto" />
+              </div>
+            )}
+
+            {/* ===== STEP 4: PUBLISH SUCCESS ===== */}
+            {currentStep === 4 && publishResult && !isPublishing && (
+              <div className="text-center max-w-lg mx-auto py-12" data-testid="publish-success">
+                <div className="w-20 h-20 rounded-full bg-emerald-600/20 flex items-center justify-center mx-auto mb-6">
+                  <CheckCircle className="w-10 h-10 text-emerald-400" />
+                </div>
+                <h2 className="text-2xl font-bold mb-2">
+                  {publishResult.status === 'published' ? 'Video Published! 🎉' : 'Video Scheduled! 📅'}
+                </h2>
+                <p className="text-zinc-400 mb-6">
+                  {publishResult.status === 'published'
+                    ? 'Your video is now live on YouTube.'
+                    : `Uploaded to YouTube as private — it will automatically go public at ${new Date(publishResult.scheduled_at).toLocaleString()}.`}
+                </p>
+                {publishResult.youtube_url && (
+                  <Button
+                    onClick={() => window.open(publishResult.youtube_url, '_blank')}
+                    className="bg-red-600 hover:bg-red-500 mb-4 w-full py-3"
+                    data-testid="view-on-youtube-btn"
+                  >
+                    <Youtube className="w-4 h-4 mr-2" /> View on YouTube
+                  </Button>
+                )}
+                <div className="flex gap-3">
+                  <Button onClick={() => navigate('/library')} variant="outline" className="flex-1 border-zinc-600">
+                    Go to Library
+                  </Button>
+                  <Button onClick={resetWizard} className="flex-1 bg-indigo-600 hover:bg-indigo-500" data-testid="create-another-btn">
+                    Create Another Video
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* ===== STEP 4: PUBLISH ===== */}
-            {currentStep === 4 && currentVideo && (
+            {currentStep === 4 && currentVideo && !isPublishing && !publishResult && (
               <div className="fade-in">
                 <div className="flex items-center gap-3 mb-6">
                   <div className="w-12 h-12 rounded-full bg-emerald-600/20 flex items-center justify-center">

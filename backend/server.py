@@ -22,6 +22,7 @@ from ai import ai_router
 from channels import channels_router
 from referrals import referrals_router
 from admin import admin_router
+from settings_api import settings_router
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -30,6 +31,45 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+async def scheduled_publish_loop():
+    """Every 60s, flip scheduled YouTube videos (uploaded as private) to public when due."""
+    from youtube import update_youtube_video
+    while True:
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cursor = db.videos.find({
+                "status": "scheduled",
+                "scheduled_at": {"$ne": None, "$lte": now_iso},
+                "youtube_video_id": {"$ne": None},
+            })
+            async for video in cursor:
+                channel = await db.channels.find_one({"channel_id": video.get("channel_id")})
+                if not channel or not channel.get("composio_connection_id"):
+                    continue
+                try:
+                    await update_youtube_video(
+                        channel["user_id"], channel["composio_connection_id"],
+                        video["youtube_video_id"], "public",
+                    )
+                    await db.videos.update_one(
+                        {"video_id": video["video_id"]},
+                        {"$set": {"status": "published",
+                                  "published_at": datetime.now(timezone.utc).isoformat(),
+                                  "progress_message": "Published to YouTube!",
+                                  "updated_at": datetime.now(timezone.utc).isoformat()}},
+                    )
+                    logging.info(f"Scheduled video {video['video_id']} published to YouTube")
+                except Exception as e:
+                    logging.error(f"Scheduled publish failed for {video['video_id']}: {e}")
+                    await db.videos.update_one(
+                        {"video_id": video["video_id"]},
+                        {"$set": {"publish_error": str(e)[:300]}},
+                    )
+        except Exception as e:
+            logging.error(f"Scheduler loop error: {e}")
+        await asyncio.sleep(60)
+
 
 # Lifespan context manager for startup/shutdown
 @asynccontextmanager
@@ -47,8 +87,10 @@ async def lifespan(app: FastAPI):
     await db.payment_transactions.create_index("session_id", unique=True)
     await db.referrals.create_index("referrer_id")
     await db.referrals.create_index("referred_user_id")
+    scheduler_task = asyncio.create_task(scheduled_publish_loop())
     yield
     # Shutdown
+    scheduler_task.cancel()
     logging.info("Shutting down VIDMATIC...")
     client.close()
 
@@ -72,6 +114,7 @@ api_router.include_router(ai_router, prefix="/ai", tags=["AI Generation"])
 api_router.include_router(channels_router, prefix="/channels", tags=["Channels"])
 api_router.include_router(referrals_router, prefix="/referrals", tags=["Referrals"])
 api_router.include_router(admin_router, prefix="/admin", tags=["Admin"])
+api_router.include_router(settings_router, prefix="/settings", tags=["Settings"])
 
 # Root API endpoint
 @api_router.get("/")

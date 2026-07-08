@@ -1,14 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient
 from auth import get_current_user
-from models import User, Channel
+from models import User
 import os
 import uuid
+import asyncio
 from datetime import datetime, timezone
-from composio import Composio, Action
+from composio import Composio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,539 +20,310 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Initialize Composio client
-COMPOSIO_API_KEY = os.environ.get('COMPOSIO_API_KEY', 'ak_Ppdy7XYc5YA9AXLUBK6E')
-composio_client = Composio(api_key=COMPOSIO_API_KEY)
+COMPOSIO_API_KEY = os.environ['COMPOSIO_API_KEY']
+FRONTEND_URL = os.environ['FRONTEND_URL']
+MEDIA_ROOT = os.path.join(os.path.dirname(__file__), "media")
 
-# Frontend URL for redirects
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://vidmatic-preview.preview.emergentagent.com')
+composio_client = Composio(
+    api_key=COMPOSIO_API_KEY,
+    dangerously_allow_auto_upload_download_files=True,
+    file_upload_dirs=[MEDIA_ROOT],
+)
 
-# YouTube Integration ID (created once and reused)
-YOUTUBE_INTEGRATION_ID = None
+_youtube_auth_config_id: Optional[str] = None
 
-async def fetch_youtube_channel_details(user_id: str, composio_connection_id: str):
-    """Fetch actual YouTube channel details using Composio"""
+
+def _get_youtube_auth_config_id() -> str:
+    """Find (or create) the YouTube auth config in Composio."""
+    global _youtube_auth_config_id
+    if _youtube_auth_config_id:
+        return _youtube_auth_config_id
+    configs = composio_client.auth_configs.list(toolkit_slug="youtube")
+    for cfg in getattr(configs, "items", []):
+        if not (getattr(cfg, "disabled", False) or getattr(cfg, "is_disabled", False)):
+            _youtube_auth_config_id = cfg.id
+            return _youtube_auth_config_id
+    created = composio_client.auth_configs.create(
+        toolkit={"slug": "youtube"},
+        options={"type": "use_composio_managed_auth", "name": "vidmatic_youtube"},
+    )
+    _youtube_auth_config_id = created.id
+    return _youtube_auth_config_id
+
+
+def _execute_tool(slug: str, user_id: str, connected_account_id: str, arguments: Dict[str, Any]) -> Dict:
+    """Execute a Composio tool (sync SDK) and return its data payload."""
+    result = composio_client.tools.execute(
+        slug,
+        arguments=arguments,
+        user_id=user_id,
+        connected_account_id=connected_account_id,
+    )
+    if isinstance(result, dict):
+        if not result.get("successful", True):
+            raise RuntimeError(result.get("error") or f"{slug} failed")
+        return result.get("data") or {}
+    return result
+
+
+async def execute_tool(slug: str, user_id: str, connected_account_id: str, arguments: Dict[str, Any]) -> Dict:
+    return await asyncio.to_thread(_execute_tool, slug, user_id, connected_account_id, arguments)
+
+
+async def fetch_youtube_channel_details(user_id: str, connected_account_id: str) -> Optional[Dict]:
+    """Fetch the connected user's YouTube channel name, avatar and statistics."""
     try:
-        entity = composio_client.get_entity(id=user_id)
-        
-        # First get user's playlists to find channel ID
-        playlists_result = entity.execute(
-            action=Action.YOUTUBE_LIST_USER_PLAYLISTS,
-            params={},
-            connected_account_id=composio_connection_id
+        playlists = await execute_tool(
+            "YOUTUBE_LIST_USER_PLAYLISTS", user_id, connected_account_id,
+            {"part": "snippet", "maxResults": 5},
         )
-        
-        if not playlists_result or not playlists_result.get('data'):
-            logger.warning("No playlists found for channel")
-            return None
-        
-        # Extract channel ID from first playlist
-        items = playlists_result['data'].get('items', [])
-        if not items:
-            logger.warning("No items in playlists response")
-            return None
-        
-        youtube_channel_id = items[0].get('snippet', {}).get('channelId')
-        channel_title = items[0].get('snippet', {}).get('channelTitle', 'YouTube Channel')
-        
+        items = playlists.get("items", []) if playlists else []
+        youtube_channel_id = None
+        channel_title = "YouTube Channel"
+        if items:
+            snippet = items[0].get("snippet", {})
+            youtube_channel_id = snippet.get("channelId")
+            channel_title = snippet.get("channelTitle", channel_title)
+
         if not youtube_channel_id:
-            logger.warning("Could not extract channel ID from playlists")
+            logger.warning("Could not determine channel ID from playlists")
             return None
-        
-        # Now get full channel statistics
-        stats_result = entity.execute(
-            action=Action.YOUTUBE_GET_CHANNEL_STATISTICS,
-            params={
-                'id': youtube_channel_id,
-                'part': 'snippet,statistics'
-            },
-            connected_account_id=composio_connection_id
+
+        stats = await execute_tool(
+            "YOUTUBE_GET_CHANNEL_STATISTICS", user_id, connected_account_id,
+            {"id": youtube_channel_id, "part": "snippet,statistics"},
         )
-        
-        if not stats_result or not stats_result.get('data'):
-            logger.warning("Could not get channel statistics")
-            return {
-                'youtube_channel_id': youtube_channel_id,
-                'channel_name': channel_title,
-                'channel_avatar': None,
-                'subscriber_count': 0,
-                'video_count': 0,
-                'view_count': 0,
-                'custom_url': None,
-                'description': None
-            }
-        
-        # Extract channel details
-        channels = stats_result['data'].get('channels', stats_result['data'].get('items', []))
+        channels = stats.get("channels") or stats.get("items") or []
         if not channels:
-            return None
-        
-        channel_data = channels[0]
-        snippet = channel_data.get('snippet', {})
-        statistics = channel_data.get('statistics', {})
-        thumbnails = snippet.get('thumbnails', {})
-        
+            return {
+                "youtube_channel_id": youtube_channel_id,
+                "channel_name": channel_title,
+                "channel_avatar": None,
+                "subscriber_count": 0, "video_count": 0, "view_count": 0,
+                "custom_url": None, "description": None,
+            }
+        ch = channels[0]
+        snippet = ch.get("snippet", {})
+        statistics = ch.get("statistics", {})
+        thumbs = snippet.get("thumbnails", {})
         return {
-            'youtube_channel_id': youtube_channel_id,
-            'channel_name': snippet.get('title', channel_title),
-            'channel_avatar': thumbnails.get('medium', thumbnails.get('default', {})).get('url'),
-            'subscriber_count': int(statistics.get('subscriberCount', 0)),
-            'video_count': int(statistics.get('videoCount', 0)),
-            'view_count': int(statistics.get('viewCount', 0)),
-            'custom_url': snippet.get('customUrl'),
-            'description': snippet.get('description', '')[:200] if snippet.get('description') else None
+            "youtube_channel_id": youtube_channel_id,
+            "channel_name": snippet.get("title", channel_title),
+            "channel_avatar": (thumbs.get("medium") or thumbs.get("default") or {}).get("url"),
+            "subscriber_count": int(statistics.get("subscriberCount", 0)),
+            "video_count": int(statistics.get("videoCount", 0)),
+            "view_count": int(statistics.get("viewCount", 0)),
+            "custom_url": snippet.get("customUrl"),
+            "description": (snippet.get("description") or "")[:200] or None,
         }
-        
     except Exception as e:
-        logger.error(f"Error fetching YouTube channel details: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error fetching YouTube channel details: {e}")
         return None
 
-async def get_or_create_youtube_integration():
-    """Get or create YouTube integration in Composio"""
-    global YOUTUBE_INTEGRATION_ID
-    
-    if YOUTUBE_INTEGRATION_ID:
-        return YOUTUBE_INTEGRATION_ID
-    
-    try:
-        # Check existing integrations
-        integrations = composio_client.integrations.get()
-        for integ in integrations:
-            if hasattr(integ, 'appName') and integ.appName == 'youtube':
-                YOUTUBE_INTEGRATION_ID = integ.id
-                logger.info(f"Found existing YouTube integration: {YOUTUBE_INTEGRATION_ID}")
-                return YOUTUBE_INTEGRATION_ID
-        
-        # Get YouTube app ID
-        apps = composio_client.apps.get()
-        youtube_app = None
-        for app in apps:
-            if getattr(app, 'key', '').lower() == 'youtube':
-                youtube_app = app
-                break
-        
-        if not youtube_app:
-            raise Exception("YouTube app not found in Composio")
-        
-        # Create new integration
-        integration = composio_client.integrations.create(
-            app_id=youtube_app.appId,
-            name='vidmatic_youtube',
-            use_composio_auth=True
-        )
-        
-        YOUTUBE_INTEGRATION_ID = integration.id
-        logger.info(f"Created new YouTube integration: {YOUTUBE_INTEGRATION_ID}")
-        return YOUTUBE_INTEGRATION_ID
-        
-    except Exception as e:
-        logger.error(f"Failed to get/create YouTube integration: {str(e)}")
-        raise
+
+async def upload_video_to_youtube(
+    user_id: str, connected_account_id: str, file_path: str,
+    title: str, description: str, tags: list, privacy_status: str = "public",
+    category_id: str = "22",
+) -> Dict:
+    """Upload a local MP4 to YouTube via Composio. Returns response_data with video id."""
+    data = await execute_tool(
+        "YOUTUBE_UPLOAD_VIDEO", user_id, connected_account_id,
+        {
+            "title": title[:100],
+            "description": description[:4900],
+            "tags": tags[:30],
+            "categoryId": category_id,
+            "privacyStatus": privacy_status,
+            "videoFilePath": file_path,
+        },
+    )
+    return data.get("response_data") or data
+
+
+async def update_youtube_video(
+    user_id: str, connected_account_id: str, youtube_video_id: str, privacy_status: str,
+) -> Dict:
+    return await execute_tool(
+        "YOUTUBE_UPDATE_VIDEO", user_id, connected_account_id,
+        {"videoId": youtube_video_id, "privacyStatus": privacy_status},
+    )
+
+
+async def set_youtube_thumbnail(
+    user_id: str, connected_account_id: str, youtube_video_id: str, thumbnail_url: str,
+) -> Dict:
+    return await execute_tool(
+        "YOUTUBE_UPDATE_THUMBNAIL", user_id, connected_account_id,
+        {"videoId": youtube_video_id, "thumbnailUrl": thumbnail_url},
+    )
+
 
 class OAuthStartRequest(BaseModel):
     redirect_uri: Optional[str] = None
 
-class UploadVideoRequest(BaseModel):
-    channel_id: str
-    video_file_path: str
-    title: str
-    description: str
-    tags: List[str]
-    thumbnail_path: Optional[str] = None
-    scheduled_at: Optional[str] = None
 
 @youtube_router.post("/oauth/start")
 async def start_oauth(req: OAuthStartRequest, user: User = Depends(get_current_user)):
-    """Start YouTube OAuth flow using Composio"""
+    """Start YouTube OAuth flow using Composio v3"""
     try:
-        # Get or create YouTube integration
-        integration_id = await get_or_create_youtube_integration()
-        
-        # Construct callback URL
+        auth_config_id = await asyncio.to_thread(_get_youtube_auth_config_id)
         callback_url = f"{FRONTEND_URL}/api/youtube/oauth/callback"
-        
-        # Initiate connection with Composio
-        connection = composio_client.connected_accounts.initiate(
-            integration_id=integration_id,
-            entity_id=user.user_id,  # Use our internal user ID
-            redirect_url=callback_url
+
+        connection = await asyncio.to_thread(
+            composio_client.connected_accounts.initiate,
+            user_id=user.user_id,
+            auth_config_id=auth_config_id,
+            callback_url=callback_url,
+            allow_multiple=True,
         )
-        
-        logger.info(f"Composio connection initiated for user {user.user_id}, connected_account_id: {connection.connectedAccountId}")
-        
-        # Store the pending connection in database for later verification
+
+        conn_id = getattr(connection, "id", None)
+        redirect_url = getattr(connection, "redirect_url", None) or getattr(connection, "redirectUrl", None)
+        logger.info(f"Composio connection initiated for user {user.user_id}: {conn_id}")
+
         await db.pending_connections.update_one(
-            {"user_id": user.user_id, "connected_account_id": connection.connectedAccountId},
-            {
-                "$set": {
-                    "user_id": user.user_id,
-                    "connected_account_id": connection.connectedAccountId,
-                    "status": connection.connectionStatus,
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }
-            },
-            upsert=True
+            {"connected_account_id": conn_id},
+            {"$set": {
+                "user_id": user.user_id,
+                "connected_account_id": conn_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }},
+            upsert=True,
         )
-        
-        return {
-            "authorization_url": connection.redirectUrl,
-            "connection_id": connection.connectedAccountId,
-            "state": connection.connectedAccountId
-        }
+        return {"authorization_url": redirect_url, "connection_id": conn_id}
     except Exception as e:
-        logger.error(f"Failed to initiate Composio connection: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Failed to initiate Composio connection: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start YouTube connection: {str(e)}")
 
+
 @youtube_router.get("/oauth/callback")
-async def oauth_callback(
-    request: Request,
-    connectionId: str = Query(None, description="Composio connection ID (old format)"),
-    connectedAccountId: str = Query(None, description="Composio connected account ID"),
-    status: str = Query(None, description="Connection status"),
-    appName: str = Query(None, description="App name"),
-    error: str = Query(None)
-):
+async def oauth_callback(request: Request):
     """Handle YouTube OAuth callback from Composio"""
-    # Composio sends connectedAccountId, not connectionId
-    connection_id = connectedAccountId or connectionId
-    
-    logger.info(f"OAuth callback received. connectedAccountId: {connectedAccountId}, connectionId: {connectionId}, status: {status}")
-    logger.info(f"Full query params: {dict(request.query_params)}")
-    
-    # Handle errors
+    params = dict(request.query_params)
+    logger.info(f"OAuth callback params: {params}")
+
+    error = params.get("error")
     if error:
-        logger.error(f"OAuth error: {error}")
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error={error}")
-    
-    if not connection_id:
-        logger.error("No connection ID received in callback")
-        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_connection_id")
-    
+
+    connection_id = (
+        params.get("connected_account_id") or params.get("connectedAccountId")
+        or params.get("connectionId") or params.get("nanoid")
+    )
+
     try:
-        # Get the connection details from Composio
-        connection = composio_client.connected_accounts.get(connection_id=connection_id)
-        
-        if not connection:
-            logger.error(f"Connection not found: {connection_id}")
-            return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=connection_not_found")
-        
-        logger.info(f"Connection retrieved: {connection}")
-        
-        # Get connection details
-        connection_dict = connection.__dict__ if hasattr(connection, '__dict__') else {}
-        # Composio stores user_id in clientUniqueUserId field
-        entity_id = connection_dict.get('clientUniqueUserId') or connection_dict.get('entityId') or connection_dict.get('entity_id')
-        conn_status = connection_dict.get('status', 'unknown')
-        
-        logger.info(f"Connection entity_id: {entity_id}, conn_status: {conn_status}")
-        
+        if not connection_id:
+            status = params.get("status", "")
+            if status.upper() in ("SUCCESS", "ACTIVE", ""):
+                pending = await db.pending_connections.find().sort("created_at", -1).to_list(1)
+                if pending:
+                    connection_id = pending[0]["connected_account_id"]
+        if not connection_id:
+            return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_connection_id")
+
+        account = await asyncio.to_thread(composio_client.connected_accounts.get, connection_id)
+        conn_status = getattr(account, "status", "unknown")
+        entity_id = getattr(account, "user_id", None)
+
         if not entity_id:
-            # Try to find the user from pending connections
             pending = await db.pending_connections.find_one({"connected_account_id": connection_id})
             if pending:
                 entity_id = pending.get("user_id")
-                logger.info(f"Found entity_id from pending connections: {entity_id}")
-        
         if not entity_id:
-            logger.error("No entity_id found")
             return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error=no_user_found")
-        
-        # Fetch actual YouTube channel details
-        logger.info(f"Fetching YouTube channel details for user {entity_id}")
-        channel_details = await fetch_youtube_channel_details(entity_id, connection_id)
-        
-        if channel_details:
-            youtube_channel_id = channel_details['youtube_channel_id']
-            channel_name = channel_details['channel_name']
-            channel_avatar = channel_details['channel_avatar']
-            subscriber_count = channel_details['subscriber_count']
-            video_count = channel_details.get('video_count', 0)
-            view_count = channel_details.get('view_count', 0)
-            custom_url = channel_details.get('custom_url')
-            description = channel_details.get('description')
-            logger.info(f"Got channel details: {channel_name} ({youtube_channel_id})")
+
+        details = await fetch_youtube_channel_details(entity_id, connection_id)
+        if details:
+            channel_fields = {
+                "youtube_channel_id": details["youtube_channel_id"],
+                "channel_name": details["channel_name"],
+                "channel_avatar": details["channel_avatar"],
+                "subscriber_count": details["subscriber_count"],
+                "video_count": details["video_count"],
+                "view_count": details["view_count"],
+                "custom_url": details["custom_url"],
+                "description": details["description"],
+            }
         else:
-            # Fallback to defaults if we couldn't fetch details
-            youtube_channel_id = connection_id
-            channel_name = "YouTube Channel"
-            channel_avatar = "https://www.youtube.com/img/desktop/yt_1200.png"
-            subscriber_count = 0
-            video_count = 0
-            view_count = 0
-            custom_url = None
-            description = None
-            logger.warning("Could not fetch channel details, using defaults")
-        
-        # Create or update channel record in database
-        channel_id = f"ch_{uuid.uuid4().hex[:12]}"
-        channel_doc = {
-            "channel_id": channel_id,
+            channel_fields = {
+                "youtube_channel_id": connection_id,
+                "channel_name": "YouTube Channel",
+                "channel_avatar": None,
+                "subscriber_count": 0, "video_count": 0, "view_count": 0,
+                "custom_url": None, "description": None,
+            }
+
+        existing = await db.channels.find_one({
             "user_id": entity_id,
-            "youtube_channel_id": youtube_channel_id,
-            "channel_name": channel_name,
-            "channel_avatar": channel_avatar,
-            "subscriber_count": subscriber_count,
-            "video_count": video_count,
-            "view_count": view_count,
-            "custom_url": custom_url,
-            "description": description,
-            "composio_connection_id": connection_id,
-            "connection_status": conn_status,
-            "connected_at": datetime.now(timezone.utc).isoformat(),
-            "is_active": True
-        }
-        
-        # Check if channel already exists for this user with this connection
-        existing_channel = await db.channels.find_one({
-            "user_id": entity_id,
-            "composio_connection_id": connection_id
+            "youtube_channel_id": channel_fields["youtube_channel_id"],
         })
-        
-        if existing_channel:
+        if existing:
+            channel_id = existing["channel_id"]
             await db.channels.update_one(
-                {"_id": existing_channel["_id"]},
+                {"_id": existing["_id"]},
                 {"$set": {
-                    "youtube_channel_id": youtube_channel_id,
-                    "channel_name": channel_name,
-                    "channel_avatar": channel_avatar,
-                    "subscriber_count": subscriber_count,
-                    "video_count": video_count,
-                    "view_count": view_count,
-                    "custom_url": custom_url,
-                    "description": description,
-                    "connection_status": conn_status,
+                    **channel_fields,
+                    "composio_connection_id": connection_id,
+                    "connection_status": str(conn_status),
                     "is_active": True,
-                    "connected_at": datetime.now(timezone.utc).isoformat()
-                }}
+                    "connected_at": datetime.now(timezone.utc).isoformat(),
+                }},
             )
-            channel_id = existing_channel["channel_id"]
-            logger.info(f"Updated existing channel: {channel_id}")
         else:
-            await db.channels.insert_one(channel_doc)
-            logger.info(f"Created new channel: {channel_id}")
-        
-        # Clean up pending connection
+            channel_id = f"ch_{uuid.uuid4().hex[:12]}"
+            await db.channels.insert_one({
+                "channel_id": channel_id,
+                "user_id": entity_id,
+                **channel_fields,
+                "composio_connection_id": connection_id,
+                "connection_status": str(conn_status),
+                "connected_at": datetime.now(timezone.utc).isoformat(),
+                "is_active": True,
+            })
+
         await db.pending_connections.delete_one({"connected_account_id": connection_id})
-        
-        # Redirect back to dashboard with success
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_connected=true&channel_id={channel_id}")
-        
     except Exception as e:
-        logger.error(f"Error processing callback: {str(e)}")
+        logger.error(f"Error processing callback: {e}")
         import traceback
         traceback.print_exc()
-        error_msg = str(e).replace(' ', '_')[:100]
-        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error={error_msg}")
+        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?youtube_error={str(e).replace(' ', '_')[:100]}")
 
-@youtube_router.get("/connection/status/{connection_id}")
-async def check_connection_status(connection_id: str, user: User = Depends(get_current_user)):
-    """Check the status of a Composio connection"""
-    try:
-        connection = composio_client.connected_accounts.get(connection_id=connection_id)
-        connection_dict = connection.__dict__ if hasattr(connection, '__dict__') else {}
-        
-        return {
-            "connection_id": connection_id,
-            "status": connection_dict.get('status', 'unknown'),
-            "entity_id": connection_dict.get('entityId'),
-            "details": connection_dict
-        }
-    except Exception as e:
-        logger.error(f"Failed to check connection status: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to check connection: {str(e)}")
 
 @youtube_router.get("/channels")
 async def get_channels(user: User = Depends(get_current_user)):
-    """Get user's connected YouTube channels"""
     channels = await db.channels.find({"user_id": user.user_id, "is_active": True}, {"_id": 0}).to_list(100)
     return channels
 
+
 @youtube_router.post("/channels/{channel_id}/sync")
 async def sync_channel_details(channel_id: str, user: User = Depends(get_current_user)):
-    """Refresh/sync channel details from YouTube"""
-    channel = await db.channels.find_one({
-        "channel_id": channel_id, 
-        "user_id": user.user_id,
-        "is_active": True
-    })
-    
+    channel = await db.channels.find_one({"channel_id": channel_id, "user_id": user.user_id, "is_active": True})
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    
-    composio_connection_id = channel.get("composio_connection_id")
-    
-    if not composio_connection_id:
+    conn_id = channel.get("composio_connection_id")
+    if not conn_id:
         raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
-    
-    # Fetch fresh channel details
-    channel_details = await fetch_youtube_channel_details(user.user_id, composio_connection_id)
-    
-    if not channel_details:
+
+    details = await fetch_youtube_channel_details(user.user_id, conn_id)
+    if not details:
         raise HTTPException(status_code=500, detail="Could not fetch channel details from YouTube")
-    
-    # Update channel in database
+
     await db.channels.update_one(
         {"channel_id": channel_id},
-        {"$set": {
-            "youtube_channel_id": channel_details['youtube_channel_id'],
-            "channel_name": channel_details['channel_name'],
-            "channel_avatar": channel_details['channel_avatar'],
-            "subscriber_count": channel_details['subscriber_count'],
-            "video_count": channel_details.get('video_count', 0),
-            "view_count": channel_details.get('view_count', 0),
-            "custom_url": channel_details.get('custom_url'),
-            "description": channel_details.get('description'),
-            "last_synced_at": datetime.now(timezone.utc).isoformat()
-        }}
+        {"$set": {**details, "last_synced_at": datetime.now(timezone.utc).isoformat()}},
     )
-    
-    # Return updated channel
-    updated_channel = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
-    return updated_channel
+    updated = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    return updated
+
 
 @youtube_router.delete("/channels/{channel_id}")
 async def disconnect_channel(channel_id: str, user: User = Depends(get_current_user)):
-    """Disconnect a YouTube channel"""
-    channel = await db.channels.find_one({"channel_id": channel_id, "user_id": user.user_id})
-    
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    
-    # Deactivate in our database
     result = await db.channels.update_one(
         {"channel_id": channel_id, "user_id": user.user_id},
-        {"$set": {"is_active": False}}
+        {"$set": {"is_active": False}},
     )
-    
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Channel not found")
-    
     return {"message": "Channel disconnected"}
-
-@youtube_router.get("/channels/{channel_id}/stats")
-async def get_channel_stats(channel_id: str, user: User = Depends(get_current_user)):
-    """Get channel statistics using Composio"""
-    channel = await db.channels.find_one({
-        "channel_id": channel_id, 
-        "user_id": user.user_id,
-        "is_active": True
-    })
-    
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    
-    composio_connection_id = channel.get("composio_connection_id")
-    
-    if not composio_connection_id:
-        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
-    
-    try:
-        # Get entity for this connection
-        entity = composio_client.get_entity(id=channel.get("user_id"))
-        
-        # Execute get channel statistics action
-        result = entity.execute(
-            action="YOUTUBE_GET_CHANNEL_STATISTICS",
-            params={},
-            connected_account_id=composio_connection_id
-        )
-        
-        if result:
-            return result
-        
-        return {
-            "channel_id": channel_id,
-            "subscriber_count": channel.get("subscriber_count", 0),
-            "message": "Using cached data"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get channel stats: {str(e)}")
-        return {
-            "channel_id": channel_id,
-            "subscriber_count": channel.get("subscriber_count", 0),
-            "error": str(e)
-        }
-
-@youtube_router.post("/upload")
-async def upload_video(req: UploadVideoRequest, user: User = Depends(get_current_user)):
-    """Upload video to YouTube using Composio"""
-    channel = await db.channels.find_one({
-        "channel_id": req.channel_id, 
-        "user_id": user.user_id,
-        "is_active": True
-    })
-    
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    
-    composio_connection_id = channel.get("composio_connection_id")
-    
-    if not composio_connection_id:
-        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
-    
-    try:
-        # Get entity for this connection
-        entity = composio_client.get_entity(id=user.user_id)
-        
-        # Execute upload video action
-        result = entity.execute(
-            action="YOUTUBE_UPLOAD_VIDEO",
-            params={
-                "file_path": req.video_file_path,
-                "title": req.title,
-                "description": req.description,
-                "tags": req.tags
-            },
-            connected_account_id=composio_connection_id
-        )
-        
-        return {
-            "message": "Video upload initiated",
-            "status": "processing",
-            "result": result
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to upload video: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload video: {str(e)}")
-
-@youtube_router.get("/channels/{channel_id}/videos")
-async def list_channel_videos(channel_id: str, user: User = Depends(get_current_user)):
-    """List videos from a channel using Composio"""
-    channel = await db.channels.find_one({
-        "channel_id": channel_id, 
-        "user_id": user.user_id,
-        "is_active": True
-    })
-    
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    
-    composio_connection_id = channel.get("composio_connection_id")
-    
-    if not composio_connection_id:
-        raise HTTPException(status_code=400, detail="No Composio connection found for this channel")
-    
-    try:
-        # Get entity for this connection
-        entity = composio_client.get_entity(id=user.user_id)
-        
-        # Execute list videos action
-        result = entity.execute(
-            action="YOUTUBE_LIST_CHANNEL_VIDEOS",
-            params={},
-            connected_account_id=composio_connection_id
-        )
-        
-        return {
-            "videos": result if result else []
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to list videos: {str(e)}")
-        return {"videos": [], "error": str(e)}

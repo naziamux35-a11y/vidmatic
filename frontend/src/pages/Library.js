@@ -5,10 +5,12 @@ import { toast } from 'sonner';
 import { 
   Video, PlayCircle, Clock, Eye, Calendar, Trash2, Edit3, 
   Download, Youtube, Loader2, ArrowLeft, Filter, Search,
-  CheckCircle, AlertCircle, Clock3, Send, MoreVertical
+  CheckCircle, AlertCircle, Clock3, Send, MoreVertical, X
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
+
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 const Library = () => {
   const navigate = useNavigate();
@@ -16,8 +18,22 @@ const Library = () => {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [playingVideo, setPlayingVideo] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+
+  const handleDownload = (video) => {
+    if (!video.download_url) {
+      toast.info('Video file not available yet');
+      return;
+    }
+    const link = document.createElement('a');
+    link.href = `${BACKEND_URL}${video.download_url}`;
+    link.download = `${video.title || video.video_id}.mp4`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success('Download started');
+  };
 
   useEffect(() => {
     fetchVideos();
@@ -55,7 +71,9 @@ const Library = () => {
       generating_video: { color: 'bg-blue-500/20 text-blue-400', icon: Loader2, label: 'Creating Video' },
       generating_voiceover: { color: 'bg-purple-500/20 text-purple-400', icon: Loader2, label: 'Generating Voice' },
       generating_thumbnail: { color: 'bg-pink-500/20 text-pink-400', icon: Loader2, label: 'Creating Thumbnails' },
+      rendering: { color: 'bg-orange-500/20 text-orange-400', icon: Loader2, label: 'Rendering HD Video' },
       ready: { color: 'bg-emerald-500/20 text-emerald-400', icon: CheckCircle, label: 'Ready' },
+      publishing: { color: 'bg-red-500/20 text-red-400', icon: Loader2, label: 'Uploading to YouTube' },
       scheduled: { color: 'bg-indigo-500/20 text-indigo-400', icon: Calendar, label: 'Scheduled' },
       published: { color: 'bg-green-500/20 text-green-400', icon: Youtube, label: 'Published' },
       failed: { color: 'bg-red-500/20 text-red-400', icon: AlertCircle, label: 'Failed' }
@@ -66,7 +84,7 @@ const Library = () => {
     
     return (
       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${config.color}`}>
-        <Icon className={`w-3 h-3 ${status.includes('generating') ? 'animate-spin' : ''}`} />
+        <Icon className={`w-3 h-3 ${(status.includes('generating') || status === 'rendering' || status === 'publishing') ? 'animate-spin' : ''}`} />
         {config.label}
       </span>
     );
@@ -178,7 +196,15 @@ const Library = () => {
                 className="bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden hover:border-zinc-700 transition-all group"
               >
                 {/* Thumbnail */}
-                <div className="relative aspect-video bg-zinc-800">
+                <div
+                  className={`relative aspect-video bg-zinc-800 ${(video.status === 'ready' || video.status === 'published' || video.status === 'scheduled') && video.video_url ? 'cursor-pointer' : ''}`}
+                  onClick={() => {
+                    if ((video.status === 'ready' || video.status === 'published' || video.status === 'scheduled') && video.video_url) {
+                      setPlayingVideo(video);
+                    }
+                  }}
+                  data-testid={`video-card-thumb-${video.video_id}`}
+                >
                   {video.selected_thumbnail_url ? (
                     <img 
                       src={video.selected_thumbnail_url} 
@@ -200,7 +226,7 @@ const Library = () => {
                   </div>
                   
                   {/* Progress Overlay for generating videos */}
-                  {video.status?.includes('generating') && (
+                  {(video.status?.includes('generating') || video.status === 'rendering' || video.status === 'pending') && (
                     <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center">
                       <Loader2 className="w-8 h-8 text-indigo-400 animate-spin mb-2" />
                       <p className="text-sm text-white">{video.progress || 0}% Complete</p>
@@ -314,7 +340,6 @@ const Library = () => {
                         size="sm" 
                         className="flex-1 bg-zinc-700 hover:bg-zinc-600"
                         onClick={() => {
-                          // Retry generation
                           api.post(`/videos/${video.video_id}/regenerate`, { regenerate_script: true })
                             .then(() => {
                               toast.success('Retrying video generation');
@@ -322,6 +347,7 @@ const Library = () => {
                             })
                             .catch(() => toast.error('Failed to retry'));
                         }}
+                        data-testid={`retry-video-btn-${video.video_id}`}
                       >
                         Retry
                       </Button>
@@ -366,6 +392,54 @@ const Library = () => {
           </div>
         )}
       </main>
+
+      {/* Video Player Modal */}
+      {playingVideo && (
+        <div
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setPlayingVideo(null)}
+          data-testid="video-player-modal"
+        >
+          <div
+            className="bg-zinc-900 rounded-2xl border border-zinc-700 max-w-4xl w-full overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+              <h3 className="font-bold truncate pr-4">{playingVideo.title || playingVideo.prompt?.substring(0, 60)}</h3>
+              <div className="flex items-center gap-2 shrink-0">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-zinc-700"
+                  onClick={() => handleDownload(playingVideo)}
+                  data-testid="modal-download-btn"
+                >
+                  <Download className="w-4 h-4 mr-1" /> Download MP4
+                </Button>
+                <button
+                  onClick={() => setPlayingVideo(null)}
+                  className="p-2 hover:bg-zinc-800 rounded-lg"
+                  data-testid="close-player-btn"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            <video
+              controls
+              autoPlay
+              className="w-full aspect-video bg-black"
+              src={`${BACKEND_URL}${playingVideo.video_url}`}
+              poster={playingVideo.selected_thumbnail_url?.startsWith('data:') ? undefined : playingVideo.selected_thumbnail_url}
+              data-testid="video-player"
+            />
+            <div className="p-4 flex items-center justify-between text-xs text-zinc-500">
+              <span>{playingVideo.rendered_duration ? `${Math.floor(playingVideo.rendered_duration / 60)}:${String(Math.round(playingVideo.rendered_duration % 60)).padStart(2, '0')} min` : ''}</span>
+              <span>{playingVideo.file_size_mb ? `${playingVideo.file_size_mb} MB · 1080p HD` : ''}</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
