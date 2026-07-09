@@ -1,5 +1,11 @@
 # Test Credentials
 
+## Admin panel login
+- Email: admin@vidmatic.com
+- Password: password
+- Role: admin (full access to /api/admin/* endpoints)
+- user_id: user_ce232ab42f55
+
 ## Email/password test account (backend + frontend login)
 - Email: e2e_render@test.com
 - Password: TestPass123
