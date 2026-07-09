@@ -94,3 +94,8 @@ android-sdk/ -e
 credentials.json
 *.key
 .credentials
+
+# Vidmatic media artifacts
+backend/media/
+*.mp4
+*.mp3
