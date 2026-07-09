@@ -4,7 +4,12 @@ from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 from auth import get_current_user
 from models import User
-from stock import validate_pexels_key, validate_pixabay_key
+from stock import (
+    validate_pexels_key,
+    validate_pixabay_key,
+    validate_videvo_key,
+    list_stock_providers,
+)
 import os
 from datetime import datetime, timezone
 
@@ -18,12 +23,19 @@ db = client[os.environ['DB_NAME']]
 class StockKeysRequest(BaseModel):
     pexels_api_key: Optional[str] = None
     pixabay_api_key: Optional[str] = None
+    videvo_api_key: Optional[str] = None
 
 
 def _mask(key: Optional[str]) -> Optional[str]:
     if not key:
         return None
     return key[:4] + "•" * 8 + key[-4:] if len(key) > 8 else "•" * 8
+
+
+@settings_router.get("/stock-providers")
+async def get_stock_providers():
+    """Ordered list of stock providers (public — used by Settings UI)."""
+    return {"providers": list_stock_providers()}
 
 
 @settings_router.get("/stock-keys")
@@ -33,8 +45,10 @@ async def get_stock_keys(user: User = Depends(get_current_user)):
     return {
         "pexels": _mask(keys.get("pexels")),
         "pixabay": _mask(keys.get("pixabay")),
+        "videvo": _mask(keys.get("videvo")),
         "has_pexels": bool(keys.get("pexels")),
         "has_pixabay": bool(keys.get("pixabay")),
+        "has_videvo": bool(keys.get("videvo")),
     }
 
 
@@ -61,6 +75,15 @@ async def update_stock_keys(req: StockKeysRequest, user: User = Depends(get_curr
         else:
             keys.pop("pixabay", None)
 
+    if req.videvo_api_key is not None:
+        key = req.videvo_api_key.strip()
+        if key:
+            if not await validate_videvo_key(key):
+                raise HTTPException(status_code=400, detail="Invalid Videvo API key. Please check it and try again.")
+            keys["videvo"] = key
+        else:
+            keys.pop("videvo", None)
+
     await db.users.update_one(
         {"user_id": user.user_id},
         {"$set": {"stock_api_keys": keys, "updated_at": datetime.now(timezone.utc).isoformat()}},
@@ -69,4 +92,5 @@ async def update_stock_keys(req: StockKeysRequest, user: User = Depends(get_curr
         "message": "Stock API keys updated",
         "has_pexels": bool(keys.get("pexels")),
         "has_pixabay": bool(keys.get("pixabay")),
+        "has_videvo": bool(keys.get("videvo")),
     }

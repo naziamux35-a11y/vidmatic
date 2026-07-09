@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
 import { toast } from 'sonner';
-import { ArrowLeft, KeyRound, Loader2, CheckCircle, Film, Image as ImageIcon, ExternalLink } from 'lucide-react';
+import { ArrowLeft, KeyRound, Loader2, CheckCircle, Film, Image as ImageIcon, ExternalLink, Sparkles, Video as VideoIcon } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 
@@ -10,13 +10,24 @@ const Settings = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [keys, setKeys] = useState({ pexels: null, pixabay: null, has_pexels: false, has_pixabay: false });
+  const [keys, setKeys] = useState({
+    pexels: null, pixabay: null, videvo: null,
+    has_pexels: false, has_pixabay: false, has_videvo: false,
+  });
+  const [providers, setProviders] = useState([]);
   const [pexelsInput, setPexelsInput] = useState('');
   const [pixabayInput, setPixabayInput] = useState('');
+  const [videvoInput, setVidevoInput] = useState('');
 
   useEffect(() => {
-    api.get('/settings/stock-keys')
-      .then(res => setKeys(res.data))
+    Promise.all([
+      api.get('/settings/stock-keys'),
+      api.get('/settings/stock-providers'),
+    ])
+      .then(([keysRes, provRes]) => {
+        setKeys(keysRes.data);
+        setProviders(provRes.data?.providers || []);
+      })
       .catch(err => { if (err.response?.status === 401) navigate('/auth'); })
       .finally(() => setLoading(false));
   }, [navigate]);
@@ -27,6 +38,7 @@ const Settings = () => {
       const payload = {};
       if (pexelsInput.trim()) payload.pexels_api_key = pexelsInput.trim();
       if (pixabayInput.trim()) payload.pixabay_api_key = pixabayInput.trim();
+      if (videvoInput.trim()) payload.videvo_api_key = videvoInput.trim();
       if (Object.keys(payload).length === 0) {
         toast.info('Enter an API key to save');
         setSaving(false);
@@ -38,6 +50,7 @@ const Settings = () => {
       setKeys(res.data);
       setPexelsInput('');
       setPixabayInput('');
+      setVidevoInput('');
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to save API keys');
     } finally {
@@ -157,9 +170,42 @@ const Settings = () => {
               </div>
             </div>
 
+            {/* Videvo */}
+            <div className="p-4 rounded-xl border border-zinc-700 bg-zinc-800/40" data-testid="videvo-key-block">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <VideoIcon className="w-4 h-4 text-purple-400" />
+                  <span className="font-medium">Videvo API Key</span>
+                  {keys.has_videvo && (
+                    <span className="flex items-center gap-1 text-xs text-emerald-400 bg-emerald-500/20 px-2 py-0.5 rounded-full">
+                      <CheckCircle className="w-3 h-3" /> Active
+                    </span>
+                  )}
+                </div>
+                <a href="https://www.videvo.net/api/" target="_blank" rel="noreferrer" className="text-xs text-indigo-400 hover:underline flex items-center gap-1">
+                  Get key <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+              {keys.has_videvo && <p className="text-xs text-zinc-500 mb-2 font-mono">{keys.videvo}</p>}
+              <div className="flex gap-2">
+                <Input
+                  data-testid="videvo-key-input"
+                  value={videvoInput}
+                  onChange={(e) => setVidevoInput(e.target.value)}
+                  placeholder={keys.has_videvo ? 'Enter new key to replace' : 'Paste your Videvo API key'}
+                  className="bg-zinc-800 border-zinc-700"
+                />
+                {keys.has_videvo && (
+                  <Button variant="outline" className="border-zinc-600 text-red-400 hover:bg-red-500/10" onClick={() => handleRemove('videvo')} data-testid="remove-videvo-btn">
+                    Remove
+                  </Button>
+                )}
+              </div>
+            </div>
+
             <Button
               onClick={handleSave}
-              disabled={saving || (!pexelsInput.trim() && !pixabayInput.trim())}
+              disabled={saving || (!pexelsInput.trim() && !pixabayInput.trim() && !videvoInput.trim())}
               className="w-full bg-indigo-600 hover:bg-indigo-500 py-3"
               data-testid="save-stock-keys-btn"
             >
@@ -167,9 +213,40 @@ const Settings = () => {
             </Button>
 
             <p className="text-xs text-zinc-500">
-              Keys are verified against the provider before saving. When set, your videos are generated with footage from your own accounts — always copyright-free and watermark-free. If not set, Vidmatic's built-in Pexels library is used.
+              Keys are verified against the provider before saving. When set, your videos are generated with footage from your own accounts — always copyright-free and watermark-free.
             </p>
           </div>
+        </div>
+
+        {/* Built-in providers (no key required) */}
+        <div className="bg-zinc-900 rounded-2xl border border-zinc-800 p-6" data-testid="builtin-providers-card">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-10 h-10 rounded-full bg-emerald-600/20 flex items-center justify-center">
+              <Sparkles className="w-5 h-5 text-emerald-400" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold">Built-in Providers</h2>
+              <p className="text-sm text-zinc-400">Free stock sources included for every user — no key required.</p>
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {providers
+              .filter(p => !p.requires_api_key)
+              .map(p => (
+                <div key={p.slug} className="p-4 rounded-xl border border-emerald-700/30 bg-emerald-950/20 flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-white">{p.display_name}</p>
+                    <p className="text-xs text-zinc-500">Always active · {p.supports_videos ? 'Videos' : ''}{p.supports_videos && p.supports_images ? ' + Images' : (p.supports_images ? 'Images' : '')}</p>
+                  </div>
+                  <span className="flex items-center gap-1 text-xs text-emerald-400 bg-emerald-500/20 px-2 py-0.5 rounded-full">
+                    <CheckCircle className="w-3 h-3" /> Enabled
+                  </span>
+                </div>
+              ))}
+          </div>
+          <p className="text-xs text-zinc-500 mt-4">
+            Search order: {providers.map(p => p.display_name).join(' → ')}
+          </p>
         </div>
       </main>
     </div>
