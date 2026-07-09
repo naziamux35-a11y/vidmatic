@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="0" skipped="0" tests="3" time="0.619" timestamp="2026-07-09T07:34:01.621217+00:00" hostname="agent-env-bbe2b5f5-26c0-4892-8fee-e605becf88cb"><testcase classname="tests.test_ffmpeg_regression" name="test_ffmpeg_binaries_resolve" time="0.059" /><testcase classname="tests.test_ffmpeg_regression" name="test_video_pipeline_no_ffmpeg_nameerror" time="0.489"><error message="failed on setup with &quot;KeyError: 'access_token'&quot;">tests/test_ffmpeg_regression.py:26: in token
+    return r.json()["access_token"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'access_token'</error></testcase><testcase classname="tests.test_ffmpeg_regression" name="test_rendering_source_has_no_bare_ffmpeg_name" time="0.000" /></testsuite></testsuites>

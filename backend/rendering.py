@@ -29,6 +29,10 @@ MAX_SEG = 30.0
 
 
 async def _run(cmd: List[str], timeout: int = 600) -> bool:
+    ffmpeg_bin, _ = await asyncio.to_thread(get_ffmpeg_binaries)
+    # Auto-prepend ffmpeg binary unless the caller already passed an absolute path
+    if not cmd or not cmd[0].startswith("/"):
+        cmd = [ffmpeg_bin] + list(cmd)
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
     )
@@ -75,7 +79,7 @@ async def _download(url: str, dest: Path) -> bool:
 
 async def _normalize_video(src: Path, dest: Path, seg_dur: float) -> bool:
     return await _run([
-        FFMPEG, "-y", "-stream_loop", "-1", "-i", str(src), "-t", f"{seg_dur:.2f}",
+        "-y", "-stream_loop", "-1", "-i", str(src), "-t", f"{seg_dur:.2f}",
         "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,setsar=1",
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
         str(dest),
