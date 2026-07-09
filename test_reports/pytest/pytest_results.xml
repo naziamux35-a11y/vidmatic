@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="6" skipped="0" tests="11" time="2.844" timestamp="2026-07-09T05:39:31.777124+00:00" hostname="agent-env-bbe2b5f5-26c0-4892-8fee-e605becf88cb"><testcase classname="backend.tests.test_vidmatic_backend.TestAuth" name="test_login_and_me" time="0.453" /><testcase classname="backend.tests.test_vidmatic_backend.TestSettings" name="test_get_stock_keys" time="0.051" /><testcase classname="backend.tests.test_vidmatic_backend.TestSettings" name="test_put_invalid_pexels" time="0.163"><failure message="AssertionError: Expected 400 got 200: {&quot;message&quot;:&quot;Stock API keys updated&quot;,&quot;has_pexels&quot;:true,&quot;has_pixabay&quot;:false}&#10;assert 200 == 400&#10; +  where 200 = &lt;Response [200]&gt;.status_code">backend/tests/test_vidmatic_backend.py:40: in test_put_invalid_pexels
+    assert r.status_code == 400, f"Expected 400 got {r.status_code}: {r.text}"
+E   AssertionError: Expected 400 got 200: {"message":"Stock API keys updated","has_pexels":true,"has_pixabay":false}
+E   assert 200 == 400
+E    +  where 200 = &lt;Response [200]&gt;.status_code</failure></testcase><testcase classname="backend.tests.test_vidmatic_backend.TestVideosList" name="test_list_contains_ready_video" time="0.213" /><testcase classname="backend.tests.test_vidmatic_backend.TestVideoAssets" name="test_stream_range_206" time="0.047"><failure message="AssertionError: Expected 206 got 404: {&quot;detail&quot;:&quot;Rendered video not available yet&quot;}&#10;assert 404 == 206&#10; +  where 404 = &lt;Response [404]&gt;.status_code">backend/tests/test_vidmatic_backend.py:65: in test_stream_range_206
+    assert r.status_code == 206, f"Expected 206 got {r.status_code}: {r.text[:200]}"
+E   AssertionError: Expected 206 got 404: {"detail":"Rendered video not available yet"}
+E   assert 404 == 206
+E    +  where 404 = &lt;Response [404]&gt;.status_code</failure></testcase><testcase classname="backend.tests.test_vidmatic_backend.TestVideoAssets" name="test_stream_no_range_200" time="0.045"><failure message="AssertionError: Expected 200 got 404: {&quot;detail&quot;:&quot;Rendered video not available yet&quot;}&#10;assert 404 == 200&#10; +  where 404 = &lt;Response [404]&gt;.status_code">backend/tests/test_vidmatic_backend.py:71: in test_stream_no_range_200
+    assert r.status_code == 200, f"Expected 200 got {r.status_code}: {r.text[:200]}"
+E   AssertionError: Expected 200 got 404: {"detail":"Rendered video not available yet"}
+E   assert 404 == 200
+E    +  where 404 = &lt;Response [404]&gt;.status_code</failure></testcase><testcase classname="backend.tests.test_vidmatic_backend.TestVideoAssets" name="test_download" time="0.049"><failure message="AssertionError: Expected 200 got 404: {&quot;detail&quot;:&quot;Rendered video not available yet&quot;}&#10;assert 404 == 200&#10; +  where 404 = &lt;Response [404]&gt;.status_code">backend/tests/test_vidmatic_backend.py:77: in test_download
+    assert r.status_code == 200, f"Expected 200 got {r.status_code}: {r.text[:200]}"
+E   AssertionError: Expected 200 got 404: {"detail":"Rendered video not available yet"}
+E   assert 404 == 200
+E    +  where 404 = &lt;Response [404]&gt;.status_code</failure></testcase><testcase classname="backend.tests.test_vidmatic_backend.TestVideoAssets" name="test_voiceover" time="0.045"><failure message="AssertionError: Expected 200 got 404: {&quot;detail&quot;:&quot;Voiceover not available&quot;}&#10;assert 404 == 200&#10; +  where 404 = &lt;Response [404]&gt;.status_code">backend/tests/test_vidmatic_backend.py:84: in test_voiceover
+    assert r.status_code == 200, f"Expected 200 got {r.status_code}: {r.text[:200]}"
+E   AssertionError: Expected 200 got 404: {"detail":"Voiceover not available"}
+E   assert 404 == 200
+E    +  where 404 = &lt;Response [404]&gt;.status_code</failure></testcase><testcase classname="backend.tests.test_vidmatic_backend.TestPublish" name="test_publish_fake_channel_404" time="0.047"><failure message="AssertionError: Expected 404 got 400: {&quot;detail&quot;:&quot;Rendered video file not found. Please regenerate the video first.&quot;}&#10;assert 400 == 404&#10; +  where 400 = &lt;Response [400]&gt;.status_code">backend/tests/test_vidmatic_backend.py:94: in test_publish_fake_channel_404
+    assert r.status_code == 404, f"Expected 404 got {r.status_code}: {r.text}"
+E   AssertionError: Expected 404 got 400: {"detail":"Rendered video file not found. Please regenerate the video first."}
+E   assert 400 == 404
+E    +  where 400 = &lt;Response [400]&gt;.status_code</failure></testcase><testcase classname="backend.tests.test_vidmatic_backend.TestYouTubeOAuth" name="test_oauth_start_returns_composio_url" time="1.597" /><testcase classname="backend.tests.test_vidmatic_backend.TestCreateValidation" name="test_invalid_video_length_400" time="0.044" /></testsuite></testsuites>

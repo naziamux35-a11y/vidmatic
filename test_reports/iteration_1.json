@@ -1,0 +1,85 @@
+{
+  "summary": "Backend + frontend e2e testing for Vidmatic. 5/11 backend tests pass. Frontend flows (login, wizard, library modal, edit step, settings) mostly work. Two critical issues found: (a) Pexels key validation is broken — invalid keys accepted as valid; (b) Rendered media for vid_3e10b384068f is missing from the pod's filesystem (/app/backend/media/vid_3e10b384068f/ does not exist) which breaks stream/download/voiceover/publish endpoints and prevents modal video playback in the UI.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/settings/stock-keys",
+        "issue": "Invalid Pexels API key ('badkey123') is accepted with 200. Root cause: validate_pexels_key() in backend/stock.py only checks response.status_code==200, but Pexels' /v1/search endpoint returns 200 for ANY (or missing) Authorization header. The invalid key gets stored and UI toast shows 'API keys verified and saved!'. This defeats the purpose of the 'Verify & Save' UX. Fix: parse JSON body — a valid pexels response contains 'photos' with content, while an unauthorized call includes 'error':'Access denied' etc. Same likely for Pixabay (should verify response has 'hits' etc). Test asserts 400 but got 200.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "GET /api/videos/vid_3e10b384068f/stream, /download, /voiceover",
+        "issue": "All return 404 'Rendered video not available yet' / 'Voiceover not available'. DB shows status=ready, file_size_mb=45.0, voiceover_duration=1.17, but /app/backend/media/vid_3e10b384068f/ directory does NOT exist on this preview pod (only vids from failed renders are present). Either the media dir was lost during pod restart (ephemeral storage) or was never persisted. Main agent's context said 'Video file on disk: /app/backend/media/vid_3e10b384068f/final.mp4' — that file is not present. This blocks 4 explicit test cases in the review.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "POST /api/videos/vid_3e10b384068f/publish",
+        "issue": "Returns 400 'Rendered video file not found. Please regenerate the video first.' before reaching the channel_id lookup, so we cannot verify the expected 404 'Channel not found' behavior for a fake channel until the media file exists. Handler order is correct; blocker is the missing media file above.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/youtube/oauth/start",
+        "issue": "Endpoint requires a JSON body (OAuthStartRequest). Passing no body returns 422. Not a bug per se, but the review said 'POST /api/youtube/oauth/start returns 200' — clients must send {} at minimum. Frontend appears to send a body, so this is OK; noting for API-doc clarity."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Library.js — Edit button",
+        "issue": "Missing required data-testid 'edit-video-btn-vid_3e10b384068f' (per-video testid). Only the generic 'Edit' text is available. Only found testid on card is 'video-card-thumb-vid_3e10b384068f'. Add data-testid={`edit-video-btn-${video.video_id}`} on the Edit button.",
+        "selector": "button:has-text('Edit')",
+        "priority": "HIGH"
+      },
+      {
+        "component": "Video player modal (Library.js)",
+        "issue": "Video element loads but stays at 0:00 and does not play. Network shows 404 on the /stream endpoint (see backend/media issue). Also, Escape key does not close the modal — only the X button does. Consider onKeyDown handler for Esc.",
+        "selector": "[data-testid='video-player']",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "Settings toast",
+        "issue": "Shows 'API keys verified and saved!' even for an invalid Pexels key (root cause is backend validation bug). UI is fine once backend is fixed.",
+        "selector": "[data-testid='save-stock-keys-btn']",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Library → play video / download",
+        "issue": "Both fail because the /stream and /download endpoints return 404 (media file missing).",
+        "affected_selectors": ["[data-testid='video-player']", "[data-testid='modal-download-btn']"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_vidmatic_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix validate_pexels_key / validate_pixabay_key in /app/backend/stock.py to inspect JSON body (photos/hits) — status 200 alone is not proof of validity because Pexels returns 200 for any Authorization header.",
+    "Restore or regenerate media files for vid_3e10b384068f under /app/backend/media/vid_3e10b384068f/final.mp4 and voiceover.mp3. If Kubernetes pod uses ephemeral storage, mount a PVC or object storage for media so rendered videos survive restarts.",
+    "Add data-testid={`edit-video-btn-${video_id}`} to the Edit button in Library.js (matches review testid spec).",
+    "(Nice-to-have) Close video-player modal on Escape keypress."
+  ],
+  "critical_code_review_comments": [
+    "validate_pexels_key / validate_pixabay_key are unreliable — they gate a paid-user feature with a status-code-only check against endpoints that respond 200 to unauthenticated requests. This is a security/UX correctness bug.",
+    "Rendered media stored on local disk (MEDIA_ROOT) is fragile in a containerised environment — DB rows point to /stream URLs whose files may vanish on pod restart. Consider persistent volume or S3-backed storage with signed URLs.",
+    "videos.py:527 credit check runs BEFORE video_length validation, so a user with 0 credits sending an invalid length gets 403 instead of 400. Prefer validating request shape first, then checking credits.",
+    "publish_pipeline checks file existence and returns 400; then queries channel. That means the fake-channel-404 test case can never surface if file is missing — consider ordering channel check first, or returning a distinct 404 body vs 400.",
+    "settings_api uses request keys pexels_api_key/pixabay_api_key while the GET response uses has_pexels/has_pexels — mixed naming style. Consider aligning."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_vidmatic_backend.py"
+  ],
+  "success_rate": {"backend": "45% (5/11 tests)", "frontend": "80% (wizard/library/edit/publish/settings screens all load; playback and settings toast blocked by backend bugs)"},
+  "test_credentials": "e2e_render@test.com / TestPass123 (login OK, /api/auth/me returns user)",
+  "seed_data_creation": "No new seed data created. Used existing user user_e9eafa639e87 and video vid_3e10b384068f (status=ready in DB but no media file on disk).",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend test suite at /app/backend/tests/test_vidmatic_backend.py covers auth, settings, videos list, stream (Range 206 + full 200), download, voiceover, publish (fake channel), youtube oauth start (must send json={}), and invalid video_length create validation. Run: `pytest /app/backend/tests/test_vidmatic_backend.py -v --junitxml=/app/test_reports/pytest/pytest_results.xml`. Currently 5/11 pass. Once (1) Pexels validation is fixed and (2) media file for vid_3e10b384068f is restored, expected 11/11. Frontend Library modal testids all present; only the Edit button needs a per-video data-testid.",
+  "rca of the issue": "1) Pexels bug: `validate_pexels_key()` treats HTTP 200 as success but the Pexels /v1/search endpoint returns 200 even without an Authorization header (verified via curl in test env — response body still contains photos array). Reproduce: `curl -H 'Authorization: badkey' 'https://api.pexels.com/v1/search?query=nature&per_page=1'` → 200 with valid photos. Fix: use an endpoint that requires auth (e.g. /v1/collections) or verify the returned JSON is what an authenticated call would return (X-Ratelimit headers only appear for authenticated calls). 2) Missing media: DB record vid_3e10b384068f was written by a previous pod, its /app/backend/media directory contents were lost, likely due to container storage not being persistent. All downstream file-serving endpoints correctly return 404 as designed."
+}
