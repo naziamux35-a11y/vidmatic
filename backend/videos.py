@@ -509,8 +509,10 @@ async def _prepare_public_thumbnail(video_id: str, thumb: str):
             r = await c.get(thumb, timeout=60.0)
             raw.write_bytes(r.content)
     dest = out_dir / "thumb.jpg"
+    from rendering import get_ffmpeg_binaries
+    ffmpeg_bin, _ = await asyncio.to_thread(get_ffmpeg_binaries)
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", str(raw),
+        ffmpeg_bin, "-y", "-i", str(raw),
         "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
         "-q:v", "3", str(dest),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
@@ -523,12 +525,12 @@ async def _prepare_public_thumbnail(video_id: str, thumb: str):
 
 @videos_router.post("/create")
 async def create_video(req: CreateVideoRequest, background_tasks: BackgroundTasks, user: User = Depends(get_current_user)):
+    if req.video_length not in DURATION_MAP:
+        raise HTTPException(status_code=400, detail="Invalid video length")
+
     total_credits = user.video_credits + user.free_video_credits
     if total_credits <= 0:
         raise HTTPException(status_code=403, detail="Insufficient video credits. Please upgrade your plan.")
-
-    if req.video_length not in DURATION_MAP:
-        raise HTTPException(status_code=400, detail="Invalid video length")
 
     video_id = f"vid_{uuid.uuid4().hex[:12]}"
     video_doc = {

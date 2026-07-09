@@ -39,6 +39,12 @@ const Library = () => {
     fetchVideos();
   }, []);
 
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') setPlayingVideo(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const fetchVideos = async () => {
     try {
       const response = await api.get('/videos/');
@@ -294,10 +300,10 @@ const Library = () => {
                         <Button 
                           size="sm" 
                           onClick={() => {
-                            // Navigate to dashboard with this video to edit/publish
                             navigate('/dashboard', { state: { editVideo: video } });
                           }}
                           className="flex-1 bg-indigo-600 hover:bg-indigo-500"
+                          data-testid={`edit-video-btn-${video.video_id}`}
                         >
                           <Edit3 className="w-3 h-3 mr-1" /> Edit
                         </Button>
@@ -305,13 +311,8 @@ const Library = () => {
                           size="sm" 
                           variant="outline"
                           className="border-zinc-700 hover:bg-zinc-800"
-                          onClick={() => {
-                            if (video.voiceover_url) {
-                              window.open(video.voiceover_url, '_blank');
-                            } else {
-                              toast.info('Voiceover not available');
-                            }
-                          }}
+                          onClick={() => handleDownload(video)}
+                          data-testid={`download-video-btn-${video.video_id}`}
                         >
                           <Download className="w-3 h-3" />
                         </Button>
@@ -319,13 +320,23 @@ const Library = () => {
                     )}
                     
                     {video.status === 'published' && (
-                      <Button 
-                        size="sm" 
-                        className="flex-1 bg-red-600 hover:bg-red-500"
-                        onClick={() => window.open(`https://youtube.com/watch?v=${video.youtube_video_id}`, '_blank')}
-                      >
-                        <Youtube className="w-3 h-3 mr-1" /> View on YouTube
-                      </Button>
+                      <>
+                        <Button 
+                          size="sm" 
+                          className="flex-1 bg-red-600 hover:bg-red-500"
+                          onClick={() => window.open(video.youtube_url || `https://youtube.com/watch?v=${video.youtube_video_id}`, '_blank')}
+                        >
+                          <Youtube className="w-3 h-3 mr-1" /> View on YouTube
+                        </Button>
+                        <Button 
+                          size="sm" 
+                          variant="outline"
+                          className="border-zinc-700 hover:bg-zinc-800"
+                          onClick={() => handleDownload(video)}
+                        >
+                          <Download className="w-3 h-3" />
+                        </Button>
+                      </>
                     )}
                     
                     {video.status === 'scheduled' && (

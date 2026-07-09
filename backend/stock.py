@@ -162,9 +162,10 @@ async def fetch_stock_images(query: str, count: int, user_keys: Dict) -> List[Di
 async def validate_pexels_key(api_key: str) -> bool:
     try:
         async with httpx.AsyncClient() as client:
+            # /v1/collections/featured requires a valid key (search endpoints do not enforce auth)
             r = await client.get(
-                "https://api.pexels.com/v1/search",
-                params={"query": "nature", "per_page": 1},
+                "https://api.pexels.com/v1/collections/featured",
+                params={"per_page": 1},
                 headers={"Authorization": api_key},
                 timeout=15.0,
             )

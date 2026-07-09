@@ -11,8 +11,17 @@ logger = logging.getLogger(__name__)
 MEDIA_ROOT = Path(__file__).parent / "media"
 MEDIA_ROOT.mkdir(exist_ok=True)
 
-FFMPEG = "ffmpeg"
-FFPROBE = "ffprobe"
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+
+
+def get_ffmpeg_binaries():
+    """Resolve ffmpeg/ffprobe: system binaries if present, else pip-installed static builds."""
+    global _FFMPEG, _FFPROBE
+    if not _FFMPEG or not _FFPROBE:
+        from static_ffmpeg import run
+        _FFMPEG, _FFPROBE = run.get_or_fetch_platform_executables_else_raise()
+    return _FFMPEG, _FFPROBE
 
 MAX_CLIPS = 40
 MIN_SEG = 4.0
@@ -36,8 +45,9 @@ async def _run(cmd: List[str], timeout: int = 600) -> bool:
 
 
 async def probe_duration(path: Path) -> Optional[float]:
+    _, ffprobe = await asyncio.to_thread(get_ffmpeg_binaries)
     proc = await asyncio.create_subprocess_exec(
-        FFPROBE, "-v", "error", "-show_entries", "format=duration",
+        ffprobe, "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", str(path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
@@ -75,7 +85,7 @@ async def _normalize_video(src: Path, dest: Path, seg_dur: float) -> bool:
 async def _normalize_image(src: Path, dest: Path, seg_dur: float) -> bool:
     frames = int(seg_dur * 30)
     return await _run([
-        FFMPEG, "-y", "-loop", "1", "-i", str(src), "-t", f"{seg_dur:.2f}",
+        "-y", "-loop", "1", "-i", str(src), "-t", f"{seg_dur:.2f}",
         "-vf",
         f"scale=2400:1350:force_original_aspect_ratio=increase,crop=2400:1350,"
         f"zoompan=z='min(zoom+0.0006,1.25)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30,setsar=1",
@@ -186,14 +196,14 @@ async def render_video_file(
 
     if voiceover_path and voiceover_path.exists():
         ok = await _run([
-            FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
             "-i", str(voiceover_path),
             "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", "-shortest", str(final),
         ], timeout=900)
     else:
         ok = await _run([
-            FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
             "-c", "copy", "-movflags", "+faststart", str(final),
         ], timeout=900)
 
